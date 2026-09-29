@@ -41,6 +41,21 @@ body {
 }
 .icon-btn:active { background: rgba(255,255,255,.15); }
 #backBtn { font-size: 40px; padding-bottom: 6px; }
+/* team sync status pill (hidden unless config.js is filled in) */
+.sync-badge {
+  flex: none; max-width: 42vw; min-height: 36px; padding: 0 10px; border-radius: 18px; border: 0; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: rgba(255,255,255,.14); color: #fff;
+}
+.sync-badge[data-state="synced"] { background: #2e7d32; }
+.sync-badge[data-state="pending"], .sync-badge[data-state="syncing"] { background: var(--accent); color: #111; }
+.sync-badge[data-state="offline"] { background: #5b6773; }
+.sync-badge[data-state="error"] { background: var(--danger); }
+.sync-badge[data-state="signedout"] { background: transparent; border: 2px solid rgba(255,255,255,.5); }
+.team-card input[type=email], .team-card input[type=password] {
+  width: 100%; min-height: var(--tap); font: inherit; color: var(--ink); padding: 10px 12px;
+  border: 2px solid var(--line); border-radius: 12px; background: #fff; -webkit-appearance: none; appearance: none;
+}
 
 /* ---------- bottom bar ---------- */
 #bottombar {

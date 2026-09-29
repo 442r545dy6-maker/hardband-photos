@@ -1,10 +1,12 @@
 /* Hardband Photos service worker: caches the app shell so the app opens offline.
    Bump VERSION whenever app files change so phones pick up the new copy. */
-const VERSION = 'hbp-v1';
+const VERSION = 'hbp-v2';
 const SHELL = [
   './',
   './index.html',
   './app.js',
+  './sync.js',
+  './config.js',
   './styles.css',
   './manifest.webmanifest',
   './vendor/jszip.min.js',
@@ -32,7 +34,16 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
-  if (url.origin !== self.location.origin) return;
+  if (url.origin !== self.location.origin) return; // team-library (Supabase) calls always go to the network
+
+  // config.js: network first so a newly pasted project URL/key is picked up right away; cached copy when offline.
+  if (url.pathname.endsWith('/config.js')) {
+    e.respondWith(fetch(req).then((res) => {
+      if (res && res.ok) { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); }
+      return res;
+    }).catch(() => caches.match(req, { ignoreSearch: true })));
+    return;
+  }
 
   if (req.mode === 'navigate') {
     e.respondWith(

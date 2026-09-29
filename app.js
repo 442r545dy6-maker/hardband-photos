@@ -21,7 +21,7 @@ const isStandalone = () => window.matchMedia('(display-mode: standalone)').match
 
 /* ================= IndexedDB ================= */
 const DB_NAME = 'hardband-photos';
-const DB_VER = 1;
+const DB_VER = 2; // v2 adds the 'outbox' store for team sync (existing data untouched)
 let dbPromise = null;
 function openDB() {
   if (dbPromise) return dbPromise;
@@ -37,10 +37,12 @@ function openDB() {
         p.createIndex('rigId', 'rigId');
       }
       if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'key' });
+      if (!db.objectStoreNames.contains('outbox')) db.createObjectStore('outbox', { keyPath: 'key' });
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => { const d = req.result; d.onversionchange = () => d.close(); resolve(d); };
     req.onerror = () => reject(req.error);
-    req.onblocked = () => reject(new Error('Database blocked — close other tabs of this app.'));
+    // An older copy of the app still open elsewhere delays the upgrade; it continues once that copy closes.
+    req.onblocked = () => { try { toast('Updating storage — close other open copies of this app.', 6000); } catch (e) { /* ignore */ } };
   });
   return dbPromise;
 }
@@ -78,6 +80,7 @@ async function putPhoto(p) {
 /* ================= state ================= */
 const S = {
   rigs: new Map(), customers: new Map(), pipeSpecs: new Map(), photos: [], meta: {},
+  gone: { rigs: new Map(), customers: new Map(), pipeSpecs: new Map() }, // deleted/merged entries (team sync tombstones)
   search: { q: '', customerId: '', rigId: '', end: '', from: '', to: '' }, showFilters: false,
   queue: [], qIndex: 0, savedCount: 0, batchValues: null, lastSaved: null, keepJoint: false,
   context: null, addContext: null, lastListHash: '#/', lastList: [], manageTab: 'rigs',
@@ -88,7 +91,7 @@ const KINDS = {
   customers: { store: 'customers', field: 'name', label: 'Customer', plural: 'Customers', ref: 'customerId', prefix: 'c' },
   pipeSpecs: { store: 'pipeSpecs', field: 'description', label: 'Pipe spec', plural: 'Pipe specs', ref: 'pipeSpecId', prefix: 's' },
 };
-const labelOf = (kind, id) => { const it = S[kind].get(id); return it ? it[KINDS[kind].field] : ''; };
+const labelOf = (kind, id) => { const it = S[kind].get(id) || S.gone[kind].get(id); return it ? it[KINDS[kind].field] : ''; };
 const sortedItems = (kind) => [...S[kind].values()].sort((a, b) => byText(a[KINDS[kind].field], b[KINDS[kind].field]));
 const countUsing = (kind, id) => S.photos.filter((p) => p[KINDS[kind].ref] === id).length;
 
@@ -108,10 +111,11 @@ async function seedIfNeeded() {
 }
 async function loadAll() {
   const [r, c, s, p, m] = await Promise.all([db.all('rigs'), db.all('customers'), db.all('pipeSpecs'), db.all('photos'), db.all('meta')]);
-  S.rigs = new Map(r.map((x) => [x.id, x]));
-  S.customers = new Map(c.map((x) => [x.id, x]));
-  S.pipeSpecs = new Map(s.map((x) => [x.id, x]));
-  S.photos = p.map((x) => ({ ...x, blob: storedToBlob(x.blob), thumb: storedToBlob(x.thumb) }));
+  for (const [kind, list] of [['rigs', r], ['customers', c], ['pipeSpecs', s]]) {
+    S[kind] = new Map(list.filter((x) => !x.deletedAt).map((x) => [x.id, x]));
+    S.gone[kind] = new Map(list.filter((x) => x.deletedAt).map((x) => [x.id, x]));
+  }
+  S.photos = p.filter((x) => !x.deletedAt).map((x) => ({ ...x, blob: storedToBlob(x.blob), thumb: storedToBlob(x.thumb) }));
   S.meta = Object.fromEntries(m.map((x) => [x.key, x.value]));
   urlCache.forEach((u) => URL.revokeObjectURL(u)); urlCache.clear();
 }
@@ -272,6 +276,7 @@ async function createLookup(kind, vals) {
   if (K.notes) item.notes = vals.notes || '';
   await db.put(K.store, item);
   S[kind].set(item.id, item);
+  markDirty(K.store, item.id);
   return item;
 }
 async function newLookupDialog(kind) {
@@ -304,7 +309,7 @@ async function editLookupDialog(kind, id) {
   const del = $('#lkDel', m);
   if (del) del.onclick = async () => {
     if (!(await confirmBox({ title: `Delete "${item[K.field]}"?`, ok: 'Delete', danger: true }))) return;
-    await db.del(K.store, id); S[kind].delete(id);
+    await removeLookup(kind, id);
     const lu = S.meta.lastUsed || {};
     if (lu[K.ref] === id) { lu[K.ref] = ''; await setMeta('lastUsed', lu); }
     toast('Deleted'); route();
@@ -325,23 +330,51 @@ async function editLookupDialog(kind, id) {
     }
     const upd = { ...item, [K.field]: name, updatedAt: Date.now() };
     if (K.notes) upd.notes = notes;
-    await db.put(K.store, upd); S[kind].set(id, upd);
+    await db.put(K.store, upd); S[kind].set(id, upd); markDirty(K.store, id);
     closeModal(true); toast('Saved — all photos updated'); route();
   };
 }
 async function mergeLookup(kind, fromId, toId, notes) {
   const K = KINDS[kind];
-  for (const p of S.photos.filter((x) => x[K.ref] === fromId)) { p[K.ref] = toId; await putPhoto(p); }
+  for (const p of S.photos.filter((x) => x[K.ref] === fromId)) { p[K.ref] = toId; p.updatedAt = Date.now(); await putPhoto(p); markDirty('photos', p.id); }
   const target = S[kind].get(toId);
-  if (K.notes && !target.notes && notes) { target.notes = notes; await db.put(K.store, target); }
-  await db.del(K.store, fromId); S[kind].delete(fromId);
+  if (K.notes && !target.notes && notes) { target.notes = notes; target.updatedAt = Date.now(); await db.put(K.store, target); markDirty(K.store, toId); }
+  await removeLookup(kind, fromId, toId);
   const lu = S.meta.lastUsed || {};
   if (lu[K.ref] === fromId) { lu[K.ref] = toId; await setMeta('lastUsed', lu); }
+}
+
+// Local-only mode: really delete (as before). Team mode: keep a tombstone so the delete reaches other phones
+// and nothing is hard-deleted on the server.
+async function removeLookup(kind, id, mergedInto) {
+  const K = KINDS[kind], item = S[kind].get(id);
+  S[kind].delete(id);
+  if (!HB_CFG.on || !item) { await db.del(K.store, id); return; }
+  const tomb = { ...item, deletedAt: Date.now(), updatedAt: Date.now() };
+  if (mergedInto) tomb.mergedInto = mergedInto;
+  await db.put(K.store, tomb); S.gone[kind].set(id, tomb); markDirty(K.store, id);
+}
+async function removePhoto(p) {
+  S.photos = S.photos.filter((x) => x.id !== p.id);
+  dropThumb(p.id);
+  if (!HB_CFG.on) { await db.del('photos', p.id); return; }
+  p.deletedAt = Date.now(); p.updatedAt = p.deletedAt;
+  await putPhoto(p); markDirty('photos', p.id); // file is uploaded first (if needed), then freed on this phone
+}
+// Re-draw the current screen after a background sync, unless the user is in the middle of something.
+function softRefresh() {
+  const h = location.hash;
+  const ae = document.activeElement;
+  if ($('#modalRoot').innerHTML || /^#\/(add|edit|saved)/.test(h) || (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))) { S.staleView = true; return; }
+  const y = window.scrollY;
+  route();
+  window.scrollTo(0, y);
 }
 
 /* ================= router ================= */
 function route() {
   closeModal(true);
+  S.staleView = false;
   S.viewUrls.forEach((u) => URL.revokeObjectURL(u)); S.viewUrls = [];
   const parts = location.hash.replace(/^#\/?/, '').split('/').map((x) => decodeURIComponent(x));
   const v = parts[0] || '';
@@ -432,7 +465,7 @@ function renderBanner() {
     html.push(`<div class="banner" id="installTip"><span>📲</span><span style="flex:1">Add to Home Screen: tap <b>Share</b> → <b>Add to Home Screen</b>, then use the icon. Photos saved here in Safari stay separate from the Home Screen app.</span><button class="btn ghost" id="hideTip" style="min-height:44px">OK</button></div>`);
   }
   const last = (S.meta.lastExport || {}).at || 0;
-  const unbacked = S.photos.filter((p) => (p.addedAt || p.createdAt) > last);
+  const unbacked = S.photos.filter((p) => (p.addedAt || p.createdAt) > last && !p.remoteImage);
   if (unbacked.length) {
     const oldest = Math.min(...unbacked.map((p) => p.addedAt || p.createdAt));
     const age = Date.now() - (last || oldest);
@@ -523,7 +556,8 @@ function renderPhoto(id) {
   const rig = S.rigs.get(p.rigId) || {};
   const canShare = !!(navigator.canShare && window.File);
   view.innerHTML = `
-    <img class="detail-img" id="detailImg" src="${viewUrl(p.blob)}" alt="Hardband photo">
+    <img class="detail-img" id="detailImg" src="${p.blob ? viewUrl(p.blob) : p.thumb ? viewUrl(p.thumb) : ''}" alt="Hardband photo">
+    ${p.blob ? '' : `<p class="muted small" id="fullNote" style="text-align:center">Loading full-size photo…</p>`}
     <div class="pager">
       <a class="btn ghost" ${prev ? `href="#/photo/${encodeURIComponent(prev)}"` : 'aria-disabled="true" style="opacity:.4;pointer-events:none"'}>‹ Prev</a>
       <span class="muted small" style="flex:0 0 auto;align-self:center">${i + 1} / ${list.length}</span>
@@ -548,17 +582,26 @@ function renderPhoto(id) {
       <a class="btn ghost block" href="${folderHash}">📁 Open folder</a>
       <button class="btn danger block" id="delBtn">🗑 Delete photo</button>
     </div>`;
+  if (!p.blob) {
+    Sync.ensureBlob(p).then((b) => {
+      if (location.hash !== `#/photo/${encodeURIComponent(p.id)}`) return;
+      const note = $('#fullNote');
+      if (!b) { if (note) note.textContent = 'Full-size photo will download when you are online and signed in.'; return; }
+      $('#detailImg').src = viewUrl(b); if (note) note.remove();
+    }).catch(() => { const note = $('#fullNote'); if (note) note.textContent = 'Full-size photo will download when you are online.'; });
+  }
   const sb = $('#shareBtn');
   if (sb) sb.onclick = async () => {
-    const f = new File([p.blob], exportFileName(p), { type: 'image/jpeg' });
+    const blob = p.blob || await Sync.ensureBlob(p).catch(() => null);
+    if (!blob) return toast('Full-size photo not downloaded yet — try again when online.');
+    const f = new File([blob], exportFileName(p), { type: 'image/jpeg' });
     if (!navigator.canShare({ files: [f] })) return toast('Sharing files is not supported here.');
     try { await navigator.share({ files: [f], title: exportFileName(p) }); } catch (e) { /* cancelled */ }
   };
   $('#delBtn').onclick = async () => {
-    if (!(await confirmBox({ title: 'Delete this photo?', msg: 'This permanently removes it from this device. It cannot be undone (unless it is in a backup ZIP).', ok: 'Delete', danger: true }))) return;
-    await db.del('photos', p.id);
-    S.photos = S.photos.filter((x) => x.id !== p.id);
-    dropThumb(p.id);
+    const msg = Sync.on ? 'This removes it from the team library on every phone. (A copy is kept on the team server.)' : 'This permanently removes it from this device. It cannot be undone (unless it is in a backup ZIP).';
+    if (!(await confirmBox({ title: 'Delete this photo?', msg, ok: 'Delete', danger: true }))) return;
+    await removePhoto(p);
     S.lastList = S.lastList.filter((x) => x !== p.id);
     toast('Photo deleted');
     location.hash = folderPhotos(p.customerId, p.rigId).length ? folderHash : '#/';
@@ -566,7 +609,8 @@ function renderPhoto(id) {
 }
 
 /* ================= add / edit form ================= */
-const CHIPS = ['Good', 'Worn', 'Flush with OD', 'Below OD', 'Cracks', 'Spalling', 'Porosity', 'Needs rebuild'];
+// Condition quick-pick buttons (they only add text to the notes box; existing notes are never changed).
+const CHIPS = ['Good', 'Rejected wire', 'Excessive porosity', 'Cracks', 'Needs repair', 'Eccentric band'];
 function renderForm(mode, id) {
   let p = null, item = null, vals;
   if (mode === 'edit') {
@@ -585,7 +629,8 @@ function renderForm(mode, id) {
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
   }
   for (const [k, kind] of [['customerId', 'customers'], ['rigId', 'rigs'], ['pipeSpecId', 'pipeSpecs']]) if (vals[k] && !S[kind].has(vals[k])) vals[k] = '';
-  const src = viewUrl(mode === 'edit' ? p.blob : item.blob);
+  const srcBlob = mode === 'edit' ? (p.blob || p.thumb) : item.blob;
+  const src = srcBlob ? viewUrl(srcBlob) : '';
   const remaining = mode === 'add' ? S.queue.length - S.qIndex : 0;
   const serials = [...new Set(S.photos.filter((x) => x.rigId === vals.rigId && x.serialNumber).sort((a, b) => b.createdAt - a.createdAt).map((x) => x.serialNumber))].slice(0, 30);
   const selectHTML = (kind, key, idAttr) => `<select id="${idAttr}" data-kind="${kind}">${vals[key] ? '' : '<option value="">— choose —</option>'}${opts(kind, vals[key])}<option value="__new">＋ New ${KINDS[kind].label.toLowerCase()}…</option></select>`;
@@ -656,7 +701,7 @@ function renderForm(mode, id) {
         const d = $('#fDate').value ? new Date($('#fDate').value).getTime() : p.createdAt;
         Object.assign(p, v, { updatedAt: Date.now() });
         if (!isNaN(d) && d !== new Date(dtLocalValue(vals.createdAt)).getTime()) { p.createdAt = d; p.dateSource = 'manual'; }
-        await putPhoto(p);
+        await putPhoto(p); markDirty('photos', p.id);
         toast('Saved');
         S.lastListHash = `#/folder/${encodeURIComponent(p.customerId || '')}/${encodeURIComponent(p.rigId || '')}`;
         history.replaceState(null, '', `#/photo/${encodeURIComponent(p.id)}`); route();
@@ -678,9 +723,11 @@ function renderForm(mode, id) {
 }
 async function saveQueued(v) {
   const it = S.queue[S.qIndex];
-  const p = { id: uid(), blob: it.blob, thumb: it.thumb, width: it.width, height: it.height, createdAt: it.createdAt, dateSource: it.dateSource, addedAt: Date.now(), origName: it.origName, ...v };
+  const now = Date.now();
+  const p = { id: uid(), blob: it.blob, thumb: it.thumb, width: it.width, height: it.height, createdAt: it.createdAt, dateSource: it.dateSource, addedAt: now, updatedAt: now, origName: it.origName, ...v };
   await putPhoto(p);
   S.photos.push(p);
+  markDirty('photos', p.id);
   S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end };
   S.savedCount++;
   await setMeta('lastUsed', { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId });
@@ -748,6 +795,55 @@ function renderManage(tab) {
   $('#addLk').onclick = async () => { const it = await newLookupDialog(tab); if (it) renderManage(tab); };
 }
 
+/* ================= team sign-in (shared library) ================= */
+function teamCardHTML() {
+  if (!Sync.on) return '';
+  const st = Sync.status();
+  if (!Sync.signedIn) return `
+    <div class="card team-card" id="teamCard">
+      <b>Team sign-in</b>
+      <p class="muted small">Sign in once with the crew's shared email and password to see and share everyone's photos and tags. Photos already on this phone stay here and are uploaded to the team library.</p>
+      <form id="teamForm" autocomplete="on">
+        <div class="field"><label for="sbEmail">Team email</label><input id="sbEmail" type="email" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" value="${esc((Sync.session || {}).email || S.meta.syncEmail || '')}"></div>
+        <div class="field"><label for="sbPass">Team password</label><input id="sbPass" type="password" autocomplete="current-password"></div>
+        <div class="field"><label for="sbName">Your name (optional — shows who changed what)</label><input id="sbName" type="text" value="${esc(S.meta.syncName || '')}" autocomplete="name"></div>
+        <p class="small" id="sbMsg" style="color:var(--danger)">${st.long && st.long.startsWith('Team sign-in expired') ? esc(st.long) : ''}</p>
+        <button type="submit" class="btn primary big block" id="sbSignIn">Sign in</button>
+      </form>
+    </div>`;
+  return `
+    <div class="card team-card" id="teamCard">
+      <b>Team library</b>
+      <div class="small" style="margin-top:4px">Signed in as <b id="sbWho">${esc(Sync.session.email || 'team')}</b>${S.meta.syncName ? ` · ${esc(S.meta.syncName)}` : ''}</div>
+      <p class="small" id="syncStatusText">${esc(st.long || st.text)}</p>
+      <div class="row"><button class="btn secondary" id="sbSyncNow">⟳ Sync now</button><button class="btn ghost" id="sbSignOut">Sign out</button></div>
+    </div>`;
+}
+function bindTeamCard() {
+  const f = $('#teamForm');
+  if (f) f.onsubmit = async (e) => {
+    e.preventDefault();
+    const email = $('#sbEmail').value.trim(), pass = $('#sbPass').value;
+    if (!email || !pass) { $('#sbMsg').textContent = 'Enter the team email and password.'; return; }
+    $('#sbSignIn').disabled = true; $('#sbMsg').textContent = '';
+    try {
+      await setMeta('syncEmail', email);
+      await Sync.signIn(email, pass, $('#sbName').value);
+      toast('Signed in — sharing photos with the team');
+      renderBackup();
+    } catch (err) {
+      $('#sbMsg').textContent = err.kind === 'offline' ? 'No connection — try again when you have signal.' : (err.message || 'Sign-in failed.');
+      $('#sbSignIn').disabled = false;
+    }
+  };
+  const sn = $('#sbSyncNow'); if (sn) sn.onclick = () => { Sync.lastError = null; Sync.run('button'); };
+  const so = $('#sbSignOut');
+  if (so) so.onclick = async () => {
+    if (!(await confirmBox({ title: 'Sign out of the team library?', msg: 'Photos stay on this phone. New photos won\'t be shared until you sign in again.', ok: 'Sign out' }))) return;
+    await Sync.signOut(); renderBackup();
+  };
+}
+
 /* ================= backup: export / import ================= */
 function exportFileName(p) {
   const band = p.bandNumber ? (p.bandNumber === 'All' ? 'All' : 'B' + p.bandNumber) : 'B0';
@@ -759,9 +855,9 @@ async function renderBackup() {
   const last = S.meta.lastExport;
   const unbacked = S.photos.filter((p) => (p.addedAt || p.createdAt) > ((last || {}).at || 0)).length;
   const total = S.photos.reduce((n, p) => n + (p.blob ? p.blob.size : 0) + (p.thumb ? p.thumb.size : 0), 0);
-  view.innerHTML = `
+  view.innerHTML = `${teamCardHTML()}
     <div class="card">
-      <div style="font-weight:800;font-size:20px">${S.photos.length} photo${S.photos.length === 1 ? '' : 's'} on this device</div>
+      <div style="font-weight:800;font-size:20px">${S.photos.length} photo${S.photos.length === 1 ? '' : 's'} ${Sync.signedIn ? 'in the library' : 'on this device'}</div>
       <div class="muted small">≈ ${fmtMB(total)} of photos · <span id="storageInfo">checking storage…</span></div>
       <div class="small" style="margin-top:8px">Last backup: <b>${last ? fmtDate(last.at) + ` (${last.count} photos)` : 'never'}</b>${unbacked ? ` · <b style="color:var(--accent-dark)">${unbacked} new since</b>` : ''}</div>
     </div>
@@ -779,6 +875,7 @@ async function renderBackup() {
       Photos live inside this app (browser storage), not in your Photos app. If the app is deleted from the Home Screen or website data is cleared, the photos go with it — export a backup regularly.
     </div>`;
   $('#exportBtn').onclick = exportZip;
+  bindTeamCard();
   try {
     const est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null;
     const persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : false;
@@ -792,12 +889,18 @@ async function exportZip() {
   try {
     const zip = new JSZip();
     const photos = S.photos.slice().sort((a, b2) => a.createdAt - b2.createdAt);
+    const need = photos.filter((p) => !p.blob && p.remoteImage);
+    for (let i = 0; i < need.length; i++) {
+      b.update(`Downloading ${i + 1} of ${need.length} from team library…`, (i + 1) / need.length * 0.1);
+      try { await Sync.ensureBlob(need[i]); } catch (e) { /* skipped below */ }
+    }
+    let skippedFiles = 0;
     const rows = [['file', 'id', 'taken', 'customer', 'rig', 'rig_notes', 'pipe_spec', 'serial_number', 'end', 'band', 'condition_notes', 'added']];
     const jsonPhotos = [];
     photos.forEach((p, i) => {
       const rig = S.rigs.get(p.rigId) || {};
       const path = `${safeName(labelOf('customers', p.customerId) || 'No customer')}/${safeName(rig.name || 'No rig')}/${exportFileName(p)}`;
-      zip.file(path, p.blob, { binary: true, date: new Date(p.createdAt) });
+      if (p.blob) zip.file(path, p.blob, { binary: true, date: new Date(p.createdAt) }); else skippedFiles++;
       rows.push([path, p.id, isoLocal(p.createdAt), labelOf('customers', p.customerId), rig.name || '', rig.notes || '', labelOf('pipeSpecs', p.pipeSpecId),
         p.serialNumber || '', p.end || '', p.bandNumber || '', p.notes || '', p.addedAt ? isoLocal(p.addedAt) : '']);
       const { blob, thumb, ...meta } = p;
@@ -814,7 +917,7 @@ async function exportZip() {
     const file = window.File ? new File([blob], name, { type: 'application/zip' }) : null;
     const canShare = !!(file && navigator.canShare && navigator.canShare({ files: [file] }));
     const markDone = () => setMeta('lastExport', { at: Date.now(), count: photos.length }).then(() => { if (location.hash === '#/backup') renderBackup(); });
-    const m = openModal(`<h3>Backup ready</h3><p class="muted">${photos.length} photos · ${fmtMB(blob.size)}<br><span class="small">${esc(name)}</span></p>
+    const m = openModal(`<h3>Backup ready</h3><p class="muted">${photos.length} photos · ${fmtMB(blob.size)}<br><span class="small">${esc(name)}</span>${skippedFiles ? `<br><span class="small">${skippedFiles} full-size photo(s) not downloaded yet (offline) — only their details are included.</span>` : ''}</p>
       <div class="stack form-actions">
         ${canShare ? '<button class="btn primary big block" id="shareZip">⇪ Share / Save to Files</button>' : ''}
         <button class="btn ${canShare ? 'secondary' : 'primary big'} block" id="dlZip">⤓ Download ZIP</button>
@@ -846,7 +949,7 @@ async function importZip(file) {
         if (!it || !it.id) continue;
         const cur = S[kind].get(it.id);
         // New entries are added; existing ones are replaced only if the backup copy was edited more recently (e.g. restoring onto a fresh phone).
-        if (!cur || (it.updatedAt || 0) > (cur.updatedAt || 0)) { await db.put(KINDS[kind].store, it); S[kind].set(it.id, it); addedLk++; }
+        if (!cur || (it.updatedAt || 0) > (cur.updatedAt || 0)) { await db.put(KINDS[kind].store, it); S[kind].set(it.id, it); markDirty(KINDS[kind].store, it.id); addedLk++; }
       }
     }
     const list = meta.photos || [];
@@ -862,8 +965,9 @@ async function importZip(file) {
       let thumb = null, w = pm.width, h = pm.height;
       try { const img = await loadImage(blob); thumb = (await drawScaled(img, 400, 0.72)).blob; w = w || img.naturalWidth; h = h || img.naturalHeight; } catch (e) { /* keep without thumb */ }
       const { file: _f, customer: _c, rig: _r, pipeSpec: _s, ...rest } = pm;
-      const rec = { ...rest, blob, thumb, width: w, height: h };
-      await putPhoto(rec); S.photos.push(rec); have.add(rec.id); added++;
+      const { remoteImage: _ri, remoteThumb: _rt, deletedAt: _d, ...clean } = rest;
+      const rec = { ...clean, blob, thumb, width: w, height: h };
+      await putPhoto(rec); S.photos.push(rec); have.add(rec.id); markDirty('photos', rec.id); added++;
     }
     b.done();
     toast(`Imported ${added} photo${added === 1 ? '' : 's'}${skipped ? `, ${skipped} already here` : ''}${missing ? `, ${missing} missing` : ''}${addedLk ? `, ${addedLk} rig/customer/spec entries updated` : ''}.`, 5000);
@@ -874,6 +978,7 @@ async function importZip(file) {
 /* ================= boot ================= */
 async function init() {
   $('#backupBtn').onclick = () => { location.hash = '#/backup'; };
+  $('#syncBadge').onclick = () => { location.hash = '#/backup'; };
   $('#manageBtn').onclick = () => { location.hash = '#/manage/' + S.manageTab; };
   $('#camBtn').addEventListener('click', () => { S.keepJoint = false; });
   $('#libBtn').addEventListener('click', () => { S.keepJoint = false; });
@@ -894,6 +999,7 @@ async function init() {
   }
   askPersist();
   route();
+  Sync.init().catch((e) => console.warn('sync init', e));
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
 }
 init();
