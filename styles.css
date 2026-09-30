@@ -279,3 +279,28 @@ dl.kv dd { margin: 0; font-weight: 600; word-break: break-word; }
 .progress > div { height: 100%; background: var(--accent); width: 0; transition: width .15s; }
 .saved-hero { text-align: center; padding: 18px 8px 6px; }
 .saved-hero .big-emoji { font-size: 60px; }
+
+/* ---------- reject log (rejected wires per operator) ---------- */
+.reject-btn { margin-top: 10px; min-height: 60px; background: #fff; color: var(--danger); border-color: var(--danger); font-weight: 800; }
+.reject-btn:active { background: #fdecea; }
+.rej-sum { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-height: 44px; margin: 2px 4px 0; color: var(--muted); font-size: 15px; text-decoration: none; }
+.rej-sum b { color: var(--danger); }
+.rej-sum .rej-sum-r { color: var(--steel); font-weight: 700; white-space: nowrap; }
+.rej-link { display: flex; align-items: center; gap: 8px; min-height: 48px; margin-top: 8px; padding: 6px 12px; border: 2px solid var(--line); border-radius: 12px;
+  background: #fff; color: var(--ink); font-weight: 700; font-size: 16px; text-decoration: none; }
+.rej-link .chev { margin-left: auto; font-size: 22px; color: var(--muted); }
+.rej-link:active { background: #fdecea; }
+.result-count + .rej-link, .result-count + .rej-none { margin: 0 0 10px; }
+.rej-none { margin: 0 4px 10px; }
+.rej-n, .rej-count { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; padding: 0 8px; border-radius: 15px;
+  background: var(--danger); color: #fff; font-weight: 800; }
+.rej-n { min-height: 26px; font-size: 15px; }
+.rej-count { min-height: 36px; font-size: 20px; min-width: 40px; }
+.rej-title { font-size: 20px; font-weight: 800; color: var(--steel); }
+.rej-big { font-size: 28px; font-weight: 800; color: var(--danger); margin: 2px 0 8px; }
+.rej-item { cursor: default; }
+.rej-item .rej-when { font-size: 17px; }
+.rej-item .rej-del { flex: none; min-height: 44px; padding: 0 12px; font-size: 15px; color: var(--danger); }
+#rejList, #rejItems { margin-top: 12px; }
+#toast.has-action { display: flex; align-items: center; gap: 12px; }
+.toast-btn { flex: none; min-height: 44px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--accent); color: #111; font: inherit; font-weight: 800; cursor: pointer; }

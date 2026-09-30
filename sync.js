@@ -92,6 +92,21 @@ function applyPhotoRow(p, r) {
   if (!('thumb' in p)) p.thumb = null;
   return p;
 }
+// Rejected-wire log (table public.rejects, migration 004_rejects.sql).
+function rejectToRow(r) {
+  return {
+    id: r.id, operator: String(r.operator || '').trim().replace(/\s+/g, ' ') || null, rejected_at: tsIso(r.rejectedAt),
+    rig_id: r.rigId || '', rig_name: r.rigName || null, serial_number: r.serialNumber || '', note: r.note || '',
+    client_updated_at: Math.round(r.updatedAt || r.rejectedAt || 0) || 0, deleted_at: tsIso(r.deletedAt),
+    created_by_name: r.loggedBy || null, updated_by_name: S.meta.syncName || null,
+  };
+}
+function rowToReject(r) {
+  const it = { id: r.id, operator: r.operator || '', rejectedAt: tsMs(r.rejected_at) || tsMs(r.created_at) || Date.now(), rigId: r.rig_id || '',
+    rigName: r.rig_name || '', serialNumber: r.serial_number || '', note: r.note || '', loggedBy: r.created_by_name || '', updatedAt: Number(r.client_updated_at) || 0 };
+  if (r.deleted_at) it.deletedAt = tsMs(r.deleted_at);
+  return it;
+}
 async function photoRecord(id) {
   const live = S.photos.find((x) => x.id === id);
   if (live) return live;
@@ -132,6 +147,10 @@ const missingCol = (e) => {
   return OPT_COLS.find((c) => new RegExp(`'${c}' column|column [\\w."]*\\b${c}\\b`, 'i').test(msg)) || '';
 };
 const isNoStageCol = (e) => missingCol(e) === 'stage';
+// Table public.rejects not created yet (migration 004_rejects.sql not run): PostgREST answers 404 PGRST205 "Could not
+// find the table 'public.rejects' in the schema cache" (older versions: 404 / 42P01 "relation does not exist");
+// missing grants give 42501 "permission denied". Rejects then stay on the phone and upload once the table exists.
+const isNoTable = (e) => !!e && (e.status === 404 || ['PGRST205', '42P01', '42501'].includes(e.code));
 const upsertRows = (table, rows) => sbFetch(`/rest/v1/${table}?on_conflict=id`, {
   method: 'POST', body: JSON.stringify(rows),
   headers: { 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' } });
@@ -142,7 +161,7 @@ const downloadObj = async (path) => { const res = await sbFetch(objPath(path), {
 
 /* ---------- the engine ---------- */
 const Sync = {
-  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, operatorCol: null, operatorCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
+  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, operatorCol: null, operatorCheckedAt: 0, rejectsTable: null, rejectsCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
   get session() { return S.meta.syncSession || null; },
   get signedIn() { return !!(HB_CFG.on && this.session && this.session.refresh_token); },
 
@@ -218,6 +237,7 @@ const Sync = {
     const put = (store, id, i) => db.put('outbox', { key: `${store}:${id}`, store, id, at: now + i / 1e6 });
     let i = 0;
     for (const t of SYNC_TABLES) for (const r of await db.all(t.store)) await put(t.store, r.id, i++);
+    for (const r of await db.all('rejects')) await put('rejects', r.id, i++);
     this.pending = await outboxCount();
   },
 
@@ -252,9 +272,10 @@ const Sync = {
   async push() {
     await this.stageCatchUp();
     await this.operatorCatchUp();
+    await this.rejectsCatchUp();
     const entries = (await db.all('outbox')).sort((a, b) => a.at - b.at);
     if (!entries.length) return;
-    const order = { customers: 0, rigs: 1, pipeSpecs: 2, photos: 3 };
+    const order = { customers: 0, rigs: 1, pipeSpecs: 2, photos: 3, rejects: 4 };
     entries.sort((a, b) => order[a.store] - order[b.store] || a.at - b.at);
     for (const t of SYNC_TABLES.filter((x) => x.kind)) {
       const es = entries.filter((e) => e.store === t.store);
@@ -286,6 +307,88 @@ const Sync = {
       this.pending = await outboxCount();
     }
     this.phase = '';
+    await this.pushRejects(entries.filter((e) => e.store === 'rejects'));
+  },
+
+  /* ----- rejects (table public.rejects, migration 004_rejects.sql) ----- */
+  // While the server has no rejects table the phone keeps them (the outbox entries move to a small "backlog" list, so
+  // the pill still shows Synced and operators never see an error). Checked again at most every 5 minutes.
+  rejectsParked() { return this.rejectsTable === false && Date.now() - (this.rejectsCheckedAt || 0) < 300000; },
+  async noRejectsTable(ids) {
+    if (this.rejectsTable !== false) console.warn('sync: server has no rejects table yet (run 004_rejects.sql) — rejects stay on this phone for now');
+    this.rejectsTable = false; this.rejectsCheckedAt = Date.now();
+    const backlog = S.meta.rejectBacklog || [], add = ids.filter((id) => !backlog.includes(id));
+    if (add.length) await setMeta('rejectBacklog', backlog.concat(add));
+  },
+  async upsertRejects(recs) {
+    for (let i = 0; i < recs.length; i += 200) await upsertRows('rejects', recs.slice(i, i + 200).map(rejectToRow));
+  },
+  async pushRejects(entries) {
+    if (!entries.length) return;
+    const recs = [], used = [];
+    for (const e of entries) {
+      const r = await db.get('rejects', e.id);
+      if (!r) { await db.del('outbox', e.key); continue; }
+      recs.push(r); used.push(e);
+    }
+    if (!recs.length) return;
+    if (this.rejectsParked()) await this.noRejectsTable(recs.map((r) => r.id));
+    else {
+      try { await this.upsertRejects(recs); this.rejectsTable = true; }
+      catch (e) { if (!isNoTable(e)) throw e; await this.noRejectsTable(recs.map((r) => r.id)); }
+    }
+    for (const e of used) await outboxDone(e);
+    this.pending = await outboxCount();
+  },
+  // Once the table exists, everything kept on the phone goes up (last-write-wins like any other record).
+  async rejectsCatchUp() {
+    const backlog = S.meta.rejectBacklog || [];
+    if (!backlog.length || this.rejectsParked()) return false;
+    this.rejectsCheckedAt = Date.now();
+    const recs = [];
+    for (const id of backlog) { const r = await db.get('rejects', id); if (r) recs.push(r); }
+    try { if (recs.length) await this.upsertRejects(recs); }
+    catch (e) { if (isNoTable(e)) { this.rejectsTable = false; return false; } throw e; }
+    this.rejectsTable = true;
+    const left = (S.meta.rejectBacklog || []).filter((id) => !backlog.includes(id)); // added while uploading
+    await setMeta('rejectBacklog', left);
+    return true;
+  },
+  async pullRejects(cursors) {
+    if (this.rejectsParked()) return;
+    const cur = cursors.rejects;
+    const since = cur ? new Date(tsMs(cur) - 60000).toISOString() : null;
+    let offset = 0, maxTs = cur || null;
+    for (;;) {
+      let q = `/rest/v1/rejects?select=*&order=updated_at.asc,id.asc&limit=500&offset=${offset}`;
+      if (since) q += `&updated_at=gte.${encodeURIComponent(since)}`;
+      let rows;
+      try { rows = await (await sbFetch(q)).json(); }
+      catch (e) { if (isNoTable(e)) { await this.noRejectsTable([]); return; } throw e; }
+      this.rejectsTable = true;
+      await this.applyRemoteRejects(rows);
+      for (const r of rows) if (!maxTs || tsMs(r.updated_at) > tsMs(maxTs)) maxTs = r.updated_at;
+      if (rows.length < 500) break;
+      offset += 500;
+    }
+    if (maxTs) cursors.rejects = maxTs;
+  },
+  async applyRemoteRejects(rows) {
+    if (!rows.length) return;
+    const outbox = new Map((await db.all('outbox')).map((e) => [e.key, e]));
+    const backlog = new Set(S.meta.rejectBacklog || []);
+    for (const r of rows) {
+      const dirty = outbox.get(`rejects:${r.id}`), local = await db.get('rejects', r.id);
+      const lts = local ? (local.updatedAt || 0) : -1, rts = Number(r.client_updated_at) || 0;
+      if (local && (dirty || backlog.has(r.id)) && lts > rts) continue;                        // our newer edit wins; it will upload
+      if (local && lts === rts && !!local.deletedAt === !!r.deleted_at) { if (dirty) await outboxDone(dirty); continue; } // already have it
+      const it = rowToReject(r);
+      await db.put('rejects', it);
+      S.rejects = S.rejects.filter((x) => x.id !== it.id);
+      if (!it.deletedAt) S.rejects.push(it);
+      if (dirty) await outboxDone(dirty);
+      this.changed = true;
+    }
   },
 
   // Upload one photo row. Until the server has the 'stage' / 'operator' column, send the row without it (so sync
@@ -377,6 +480,7 @@ const Sync = {
       }
       if (maxTs) cursors[t.table] = maxTs;
     }
+    await this.pullRejects(cursors);
     await setMeta('syncCursor', cursors);
   },
 

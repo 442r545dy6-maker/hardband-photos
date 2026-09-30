@@ -102,6 +102,29 @@ end $$;
 alter table public.photos add column if not exists operator text;
 create index if not exists photos_operator_idx on public.photos (operator);
 
+-- ---------- migration 004: reject log (rejected wires per operator) ----------
+-- Same as supabase/migrations/004_rejects.sql. One row per rejected wire; operator 'Name Number' (null = unassigned).
+create table if not exists public.rejects (
+  id                text primary key,
+  operator          text,
+  rejected_at       timestamptz not null default now(),
+  rig_id            text not null default '',
+  rig_name          text,
+  serial_number     text not null default '',
+  note              text not null default '',
+  client_updated_at bigint not null default 0,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now(),
+  deleted_at        timestamptz,
+  created_by        uuid default auth.uid(),
+  created_by_name   text,
+  updated_by        uuid,
+  updated_by_name   text
+);
+create index if not exists rejects_updated_at_idx  on public.rejects (updated_at, id);
+create index if not exists rejects_operator_idx    on public.rejects (operator);
+create index if not exists rejects_rejected_at_idx on public.rejects (rejected_at);
+
 -- ---------- indexes (phones pull "changed since" by updated_at) ----------
 create index if not exists customers_updated_at_idx  on public.customers  (updated_at, id);
 create index if not exists rigs_updated_at_idx       on public.rigs       (updated_at, id);
@@ -135,7 +158,7 @@ $$;
 do $$
 declare t text;
 begin
-  foreach t in array array['customers', 'rigs', 'pipe_specs', 'photos'] loop
+  foreach t in array array['customers', 'rigs', 'pipe_specs', 'photos', 'rejects'] loop
     execute format('drop trigger if exists hb_before_write on public.%I', t);
     execute format('create trigger hb_before_write before insert or update on public.%I
                     for each row execute function public.hb_before_write()', t);
@@ -158,11 +181,27 @@ drop trigger if exists hb_photos_keep_paths on public.photos;
 create trigger hb_photos_keep_paths before update on public.photos
   for each row execute function public.hb_photos_keep_paths();   -- runs after hb_before_write (alphabetical)
 
+-- Rejects: keep who first logged it, whatever later edits send.
+create or replace function public.hb_rejects_keep_creator()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  new.created_by := old.created_by;
+  new.created_by_name := coalesce(old.created_by_name, new.created_by_name);
+  return new;
+end;
+$$;
+drop trigger if exists hb_rejects_keep_creator on public.rejects;
+create trigger hb_rejects_keep_creator before update on public.rejects
+  for each row execute function public.hb_rejects_keep_creator();
+
 -- ---------- grants + Row Level Security (signed-in team only) ----------
 do $$
 declare t text;
 begin
-  foreach t in array array['customers', 'rigs', 'pipe_specs', 'photos'] loop
+  foreach t in array array['customers', 'rigs', 'pipe_specs', 'photos', 'rejects'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('revoke all on table public.%I from anon', t);
     execute format('revoke delete, truncate on table public.%I from authenticated', t);
@@ -213,4 +252,5 @@ notify pgrst, 'reload schema';
 select 'customers' as table_name, count(*) from public.customers
 union all select 'rigs', count(*) from public.rigs
 union all select 'pipe_specs', count(*) from public.pipe_specs
-union all select 'photos', count(*) from public.photos;
+union all select 'photos', count(*) from public.photos
+union all select 'rejects', count(*) from public.rejects;

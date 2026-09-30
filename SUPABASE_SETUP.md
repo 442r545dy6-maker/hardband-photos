@@ -40,17 +40,17 @@ changes its screens from time to time. If a button looks a little different, loo
 ## 3. Create the tables and the photo storage (copy and paste)
 1. In the left sidebar, click **SQL Editor**.
 2. Start a new, empty query (a **+** or **New query** button).
-3. Open the file `supabase/setup.sql` from the app's GitHub repository (branch `shared-sync`), copy **all** of it,
+3. Open the file `supabase/setup.sql` from the app's GitHub repository (branch `main`), copy **all** of it,
    and paste it into the editor.
 4. Click **Run**.
    - You may get a **"Potential issue detected"** box that says the query has destructive operations.
      That's expected. The script replaces its **own** access rules if you run it again, and it never deletes data.
      Click **Run query**. If you're offered **Run and enable RLS**, that's fine too.
-5. Near the bottom you should see a small results table: customers 1, rigs 1, pipe_specs 1, photos 0.
+5. Near the bottom you should see a small results table: customers 1, rigs 1, pipe_specs 1, photos 0, rejects 0.
    That means it worked. (Running it again later is safe.)
 
 This created:
-- tables **customers, rigs, pipe_specs, photos**, with EOG / rig "Six" / 4-1/2" Range 3, 450 Duo already in them,
+- tables **customers, rigs, pipe_specs, photos** and **rejects** (the reject log), with EOG / rig "Six" / 4-1/2" Range 3, 450 Duo already in them,
 - a **private** storage bucket called **hardband** for the photos and thumbnails,
 - security rules so that **only signed-in crew** can see or change anything, and **nobody can hard-delete** anything.
 
@@ -63,14 +63,25 @@ If your project was created with an older `setup.sql`, add the new **stage** col
 
 Phones keep syncing even before you run it; photos marked *Before hardband* get their stage uploaded afterwards.
 
-### Add the Operator column (who did the work) — run this once
-1. **SQL Editor** → new query.
-2. Paste all of `supabase/migrations/003_operator.sql` and click **Run**. It only adds a column; nothing is changed or deleted,
-   and it's safe to run again.
-3. The results show your photos by operator. Older photos show as `null (= No operator)`.
+### ▶ To do now: Operator column + Reject log — ONE file, run it once
+This single file covers **both** pending updates: the Operator column on photos (same as `003_operator.sql`) and the new
+**rejects** table for the reject log (`004_rejects.sql`). You do **not** need to run `003_operator.sql` separately
+(running it as well is harmless).
+1. In Supabase, click **SQL Editor** in the left sidebar, then start a new, empty query (**+** or **New query**).
+2. Open this link, select everything (Ctrl+A / ⌘A), copy, and paste it into the editor:
+   https://raw.githubusercontent.com/442r545dy6-maker/hardband-photos/main/supabase/migrations/004_rejects.sql
+   (It's the file `supabase/migrations/004_rejects.sql` in the app's GitHub repository.)
+3. Click **Run**.
+   - If a **"Potential issue detected"** box says the query has destructive operations, that's expected: the file
+     replaces its **own** access rules if it's run again. It never deletes data. Click **Run query**.
+4. The small results table shows **(photos with an operator)** with a number, plus one row per operator who has logged
+   rejects (none the first time, which is normal). That means it worked. Running it again later is safe.
 
-Phones keep syncing even before you run it: the operator stays on each phone and is uploaded automatically once the
-column exists. Until then, other phones don't see who took a photo.
+What it adds: the `operator` column on photos, and a `rejects` table (operator, date/time, optional rig / serial / note)
+with the same security as photos: only the signed-in crew can see or add rejects, and nobody can hard-delete them.
+
+Phones keep working before you run it: operators and rejects stay on each phone and upload by themselves within a few
+minutes after it's run. Until then, other phones don't see who took a photo, and each phone only counts its own rejects.
 
 ## 4. Create the team login
 1. In the left sidebar, click **Authentication**, then **Users**.

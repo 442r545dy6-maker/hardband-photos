@@ -10,6 +10,8 @@ optionally, in a **shared team library** (Supabase), so the whole crew sees the 
 - `supabase/setup.sql`: run once in the Supabase SQL Editor (tables, indexes, RLS, private `hardband` bucket, seed rows)
 - `supabase/migrations/002_stage.sql`: adds `photos.stage` to a project that was set up before the Before/After stage existed
 - `supabase/migrations/003_operator.sql`: adds `photos.operator` (who did the work)
+- `supabase/migrations/004_rejects.sql`: adds the `rejects` table (reject log) **and** repeats 003, so it is the one file
+  to run on a project that has neither yet
 - `SUPABASE_SETUP.md`: click-by-click setup for a non-developer
 - `manifest.webmanifest`, `sw.js`: installable + offline app shell (bump `VERSION` in sw.js when files change)
 - `vendor/jszip.min.js`: JSZip 3.10.1 (bundled locally for offline ZIP export/import)
@@ -64,6 +66,27 @@ It's part of the common photo record, so future record types (e.g. welding) inhe
   without it (same PGRST204 detection as `stage`) and each phone keeps its operators, then fills them in on the server
   (operator-only PATCH where still empty) once the column exists.
 
+## Reject log (rejected wires per operator)
+Each rejected wire can be logged in two taps, and the app counts rejects per operator.
+- Home screen: **⛔ Log rejected wire** right under the *👷 Operator* chip → a sheet with the operator (pre-picked from
+  the phone; with none set, the same pick-your-name dropdown / *＋ Add new operator…* is required first), the time it
+  will be saved with, and **⛔ Log reject**. *Add details* (collapsed, optional) = rig (defaults to the last-used rig),
+  serial, short note. Nothing else is required. A toast *Reject logged — Dusty 104* with **Undo** follows; a line under
+  the button shows *Your rejects today* and links to the per-operator list.
+- **Rejects by operator** (`#/rejects`, also a link under Filter → Operator): one row per operator (same number = same
+  operator, case/spaces ignored) with the count and last reject, most rejects first, plus *Unassigned* if any. Tap a
+  name: every reject with its date and time (phone's local time), rig / serial / note, and **🗑 Delete** (asks first),
+  plus *Show photos*. **⤓ Rejects list (CSV for Excel)** shares/downloads all rejects.
+- Filter → Operator options read e.g. *Dusty 104 — 12 photos, 3 rejects* (operators with only rejects are listed too);
+  with an operator selected, the results show *⛔ 3 rejects logged ›*.
+- Export ZIP: `rejects.csv` (one row per reject, local time, operator + number, rig, serial, note, logged_by, id),
+  `rejects_by_operator.csv` (counts), and `rejects` in metadata.json; import restores missing rejects.
+- Storage: IndexedDB store `rejects` (DB version 3). Delete is soft (`deletedAt`) in team mode.
+- Team sync: table `public.rejects` (`supabase/migrations/004_rejects.sql`, same RLS as photos: authenticated only, no
+  DELETE). Rejects go through the outbox like photos (offline → queued). If the table doesn't exist yet (PostgREST
+  `404 PGRST205`, or `42P01` / `42501`), the phone keeps them in `meta.rejectBacklog`, the pill still shows ✓ Synced,
+  and it re-checks at most every 5 minutes, then uploads them (last-write-wins by `client_updated_at`).
+
 ## Shared team library (optional)
 1. Follow `SUPABASE_SETUP.md` (free Supabase project → run `supabase/setup.sql` → create the team user → turn off sign-ups).
 2. Paste the Project URL and publishable key into `config.js`, bump `VERSION` in `sw.js`, and publish.
@@ -92,7 +115,8 @@ team project.
   `config.js`), including the Before/After stage. Stage screenshots go to `hbtest/shots/`.
 - `/workspace/.pwvenv/bin/python /workspace/hbtest/test_sync.py`: two phones against an in-memory fake Supabase
   (`hbtest/mock_supabase.py`), including the upgrade from the current `main` version with photos already on the phone,
-  a server without the `stage` column (then migrated), and a phone still on the old version editing a Before photo.
+  a server without the `stage` column (then migrated), a phone still on the old version editing a Before photo,
+  the operator column, and the reject log (no table → kept on the phone → migrated → second phone, undo/delete, offline).
 
 ## Hosting
 Any static HTTPS host works (service workers and install need HTTPS; `localhost` also works for testing).

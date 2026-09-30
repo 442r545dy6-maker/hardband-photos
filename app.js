@@ -21,7 +21,7 @@ const isStandalone = () => window.matchMedia('(display-mode: standalone)').match
 
 /* ================= IndexedDB ================= */
 const DB_NAME = 'hardband-photos';
-const DB_VER = 2; // v2 adds the 'outbox' store for team sync (existing data untouched)
+const DB_VER = 3; // v2 adds the 'outbox' store for team sync, v3 the 'rejects' store (rejected-wire log); existing data untouched
 let dbPromise = null;
 function openDB() {
   if (dbPromise) return dbPromise;
@@ -38,6 +38,7 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'key' });
       if (!db.objectStoreNames.contains('outbox')) db.createObjectStore('outbox', { keyPath: 'key' });
+      if (!db.objectStoreNames.contains('rejects')) db.createObjectStore('rejects', { keyPath: 'id' });
     };
     req.onsuccess = () => { const d = req.result; d.onversionchange = () => d.close(); resolve(d); };
     req.onerror = () => reject(req.error);
@@ -79,7 +80,7 @@ async function putPhoto(p) {
 
 /* ================= state ================= */
 const S = {
-  rigs: new Map(), customers: new Map(), pipeSpecs: new Map(), photos: [], meta: {},
+  rigs: new Map(), customers: new Map(), pipeSpecs: new Map(), photos: [], rejects: [], meta: {},
   gone: { rigs: new Map(), customers: new Map(), pipeSpecs: new Map() }, // deleted/merged entries (team sync tombstones)
   search: { q: '', customerId: '', rigId: '', end: '', stage: '', op: '', from: '', to: '' }, showFilters: false,
   queue: [], qIndex: 0, savedCount: 0, batchValues: null, lastSaved: null, keepJoint: false,
@@ -136,6 +137,7 @@ function operatorRoster() {
   add(currentOperator());
   for (const l of lsGet(OP_LS.list, []) || []) add(l);
   for (const p of S.photos.slice().sort((a, b) => (b.updatedAt || b.addedAt || 0) - (a.updatedAt || a.addedAt || 0))) add(p.operator);
+  for (const r of S.rejects.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))) add(r.operator); // operators known only from rejects
   return [...m.entries()].map(([key, label]) => ({ key, label })).sort((a, b) => byText(a.label, b.label));
 }
 const opLinkHTML = (p) => { const k = opKey(p && p.operator);
@@ -245,12 +247,13 @@ async function seedIfNeeded() {
   await db.put('meta', { key: 'seeded', value: Date.now() });
 }
 async function loadAll() {
-  const [r, c, s, p, m] = await Promise.all([db.all('rigs'), db.all('customers'), db.all('pipeSpecs'), db.all('photos'), db.all('meta')]);
+  const [r, c, s, p, m, x] = await Promise.all([db.all('rigs'), db.all('customers'), db.all('pipeSpecs'), db.all('photos'), db.all('meta'), db.all('rejects')]);
   for (const [kind, list] of [['rigs', r], ['customers', c], ['pipeSpecs', s]]) {
     S[kind] = new Map(list.filter((x) => !x.deletedAt).map((x) => [x.id, x]));
     S.gone[kind] = new Map(list.filter((x) => x.deletedAt).map((x) => [x.id, x]));
   }
   S.photos = p.filter((x) => !x.deletedAt).map((x) => ({ ...x, blob: storedToBlob(x.blob), thumb: storedToBlob(x.thumb) }));
+  S.rejects = x.filter((y) => !y.deletedAt);
   S.meta = Object.fromEntries(m.map((x) => [x.key, x.value]));
   urlCache.forEach((u) => URL.revokeObjectURL(u)); urlCache.clear();
 }
@@ -351,8 +354,16 @@ function setChrome({ title, back = null, bottom = true, insp = false }) {
   document.body.style.paddingBottom = bottom ? '' : 'calc(24px + env(safe-area-inset-bottom, 0px))';
 }
 let toastTimer;
-function toast(msg, ms = 2600) {
+// action = { label, fn }: a button inside the toast (e.g. Undo right after logging a reject).
+function toast(msg, ms = 2600, action = null) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
+  t.classList.toggle('has-action', !!action);
+  if (action) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'toast-btn'; b.id = 'toastAction'; b.textContent = action.label;
+    b.onclick = () => { clearTimeout(toastTimer); t.hidden = true; action.fn(); };
+    t.appendChild(b);
+  }
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, ms);
 }
 function openModal(html, { locked = false, onCancel = null } = {}) {
@@ -528,6 +539,7 @@ function route() {
     else if (v === 'saved') renderSaved();
     else if (v === 'manage') renderManage(parts[1]);
     else if (v === 'backup') renderBackup();
+    else if (v === 'rejects') renderRejects(parts[1]);
     else { location.hash = '#/'; return; }
   } catch (e) { console.error(e); view.innerHTML = `<div class="card">Something went wrong: ${esc(e.message)}</div>`; }
   window.scrollTo(0, S.scroll[location.hash] || 0);
@@ -567,19 +579,25 @@ function tileHTML(p, showFolder) {
   const sub = showFolder ? `${labelOf('rigs', p.rigId)} · ${fmtShort(p.createdAt)}` : fmtShort(p.createdAt);
   return `<a class="tile" href="#/photo/${encodeURIComponent(p.id)}" data-id="${esc(p.id)}"><img loading="lazy" src="${thumbUrl(p)}" alt="${esc(cap)}">${stageBadge(p, 'on-tile')}<span class="cap">${esc(cap)}<span class="cap2">${esc(sub)}</span></span></a>`;
 }
-// Operator filter: All, Unassigned, then every operator found on the records (one entry per number).
+// Operator filter: All, Unassigned, then every operator found on the records or rejects (one entry per number),
+// each with its photo count and reject count.
 function opFilterList() {
-  const roster = new Map(operatorRoster().map((o) => [o.key, o.label])), found = new Map();
+  const roster = new Map(operatorRoster().map((o) => [o.key, o.label])), found = new Map(), seen = new Map();
+  const slot = (k, label) => { if (!found.has(k)) found.set(k, { n: 0, r: 0 }); if (!seen.has(k)) seen.set(k, cleanOp(label)); return found.get(k); };
   let none = 0;
-  for (const p of S.photos) { const k = opKey(p.operator); if (!k) { none++; continue; } found.set(k, (found.get(k) || 0) + 1); }
-  const list = [...found.entries()].map(([key, n]) => ({ key, n, label: roster.get(key) || cleanOp(S.photos.find((p) => opKey(p.operator) === key).operator) }));
-  return { list: list.sort((a, b) => byText(a.label, b.label)), none };
+  for (const p of S.photos) { const k = opKey(p.operator); if (!k) { none++; continue; } slot(k, p.operator).n++; }
+  const rc = rejectCounts();
+  for (const [k, n] of rc.m) slot(k, rc.label.get(k)).r = n;
+  const list = [...found.entries()].map(([key, c]) => ({ key, n: c.n, r: c.r, label: roster.get(key) || seen.get(key) }));
+  return { list: list.sort((a, b) => byText(a.label, b.label)), none, noneR: rc.none };
 }
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const countsText = (n, r) => plural(n, 'photo') + (r ? ', ' + plural(r, 'reject') : '');
 function opFilterOpts(sel) {
-  const { list, none } = opFilterList();
-  if (sel && sel !== '__none' && !list.some((o) => o.key === sel)) list.push({ key: sel, n: 0, label: (operatorRoster().find((o) => o.key === sel) || {}).label || sel.slice(2) });
-  return `<option value="">All operators</option><option value="__none" ${sel === '__none' ? 'selected' : ''}>Unassigned (no operator)${none ? ` (${none})` : ''}</option>` +
-    list.map((o) => `<option value="${esc(o.key)}" ${o.key === sel ? 'selected' : ''}>${esc(o.label)} (${o.n})</option>`).join('');
+  const { list, none, noneR } = opFilterList();
+  if (sel && sel !== '__none' && !list.some((o) => o.key === sel)) list.push({ key: sel, n: 0, r: 0, label: (operatorRoster().find((o) => o.key === sel) || {}).label || sel.slice(2) });
+  return `<option value="">All operators</option><option value="__none" ${sel === '__none' ? 'selected' : ''}>Unassigned (no operator)${none || noneR ? ` — ${countsText(none, noneR)}` : ''}</option>` +
+    list.map((o) => `<option value="${esc(o.key)}" ${o.key === sel ? 'selected' : ''}>${esc(o.label)} — ${countsText(o.n, o.r)}</option>`).join('');
 }
 const opFilterLabel = (key) => (key === '__none' ? 'No operator' : (opFilterList().list.find((o) => o.key === key) || operatorRoster().find((o) => o.key === key) || { label: key.slice(2) }).label);
 const opts = (kind, sel, blank) => (blank ? `<option value="">${esc(blank)}</option>` : '') +
@@ -592,12 +610,15 @@ function renderHome() {
   const curOp = currentOperator();
   view.innerHTML = `
     <button type="button" id="opChip" class="op-chip${curOp ? '' : ' unset'}" aria-label="Operator on this phone">👷 <span class="op-chip-l">Operator:</span> <b id="opChipName">${esc(curOp || 'Tap to pick your name')}</b> <span class="op-chip-c">▾</span></button>
+    <button type="button" id="rejectBtn" class="btn reject-btn big block">⛔ Log rejected wire</button>
+    ${rejectSummaryHTML(curOp)}
     <div class="searchbar">
       <input id="q" type="search" placeholder="Search serial, rig, notes…" value="${esc(s.q)}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-label="Search">
       <button id="filterBtn" class="btn ghost" aria-expanded="${S.showFilters}">Filter${fc ? `<span class="chip-count">${fc}</span>` : ''}</button>
     </div>
     <div id="filters" class="filters card" ${S.showFilters ? '' : 'hidden'}>
-      <div class="full"><label for="fO">Operator</label><select id="fO">${opFilterOpts(s.op)}</select></div>
+      <div class="full"><label for="fO">Operator</label><select id="fO">${opFilterOpts(s.op)}</select>
+        <a class="rej-link" id="rejectsLink" href="#/rejects">⛔ Rejects by operator <span class="rej-n" id="rejectsLinkN">${S.rejects.length}</span> <span class="chev">›</span></a></div>
       <div><label for="fC">Customer</label><select id="fC">${opts('customers', s.customerId, 'Any customer')}</select></div>
       <div><label for="fR">Rig</label><select id="fR">${opts('rigs', s.rigId, 'Any rig')}</select></div>
       <div><label for="fE">End</label><select id="fE"><option value="">Box or Pin</option><option ${s.end === 'Box' ? 'selected' : ''}>Box</option><option ${s.end === 'Pin' ? 'selected' : ''}>Pin</option></select></div>
@@ -616,6 +637,7 @@ function renderHome() {
   bind('#fO', 'op'); bind('#fC', 'customerId'); bind('#fR', 'rigId'); bind('#fE', 'end'); bind('#fS', 'stage'); bind('#fFrom', 'from'); bind('#fTo', 'to');
   $('#fClear').onclick = () => { Object.assign(s, { q: '', customerId: '', rigId: '', end: '', stage: '', op: '', from: '', to: '' }); renderHome(); };
   $('#opChip').onclick = operatorSheet;
+  $('#rejectBtn').onclick = logRejectSheet;
   renderBanner();
   renderHomeBody();
 }
@@ -641,7 +663,10 @@ function renderHomeBody() {
     const res = searchPhotos();
     S.lastList = res.map((p) => p.id);
     const opNote = S.search.op ? ` · <span id="resultOp">${S.search.op === '__none' ? 'no operator' : '👷 ' + esc(opFilterLabel(S.search.op))}</span> <button type="button" class="btn ghost op-clear" id="opClear">✕ All operators</button>` : '';
-    body.innerHTML = `<div class="result-count" id="resultCount">${res.length} photo${res.length === 1 ? '' : 's'} found${opNote}</div>` +
+    const nRej = S.search.op ? rejectsOf(S.search.op).length : 0;
+    const rejNote = S.search.op ? (nRej ? `<a class="rej-link" id="opRejects" href="#/rejects/${encodeURIComponent(S.search.op)}">⛔ ${plural(nRej, 'reject')} logged <span class="chev">›</span></a>`
+      : '<div class="muted small rej-none" id="opRejects">⛔ No rejects logged</div>') : '';
+    body.innerHTML = `<div class="result-count" id="resultCount">${res.length} photo${res.length === 1 ? '' : 's'} found${opNote}</div>${rejNote}` +
       (res.length ? `<div class="grid" id="results">${res.map((p) => tileHTML(p, true)).join('')}</div>` : `<div class="empty">No matches.</div>`);
     const oc = $('#opClear'); if (oc) oc.onclick = () => { S.search.op = ''; renderHome(); };
     return;
@@ -1230,6 +1255,171 @@ function drawInspBar(v) {
   $('#inspDone').hidden = v === 'add'; // the photo form has its own Save / Discard
 }
 
+/* ================= rejects: rejected-wire log ================= */
+// One record per rejected wire: { id, operator ('Name Number'), rejectedAt (ms), rigId, rigName, serialNumber, note,
+// loggedBy (team sign-in name on the phone), updatedAt, deletedAt? }. Only the operator is required.
+// Counted per operator by number (opKey), like the photos. Shared through the team-library table public.rejects
+// (supabase/migrations/004_rejects.sql); until that table exists they stay on the phone and upload later.
+// Delete = soft (deletedAt) in team mode, so the delete reaches the other phones; nothing is hard-deleted.
+function rejectCounts() {
+  const m = new Map(), label = new Map(); let none = 0;
+  for (const r of S.rejects) {
+    const k = opKey(r.operator);
+    if (!k) { none++; continue; }
+    m.set(k, (m.get(k) || 0) + 1);
+    if (!label.has(k)) label.set(k, cleanOp(r.operator));
+  }
+  return { m, label, none };
+}
+const rejectsOf = (key) => S.rejects.filter((r) => (key === '__none' ? !opKey(r.operator) : opKey(r.operator) === key)).sort((a, b) => b.rejectedAt - a.rejectedAt);
+const opLabel = (key, fallback) => (key === '__none' ? 'Unassigned (no operator)' : (operatorRoster().find((o) => o.key === key) || {}).label || fallback || key.slice(2));
+const rejectRig = (r) => labelOf('rigs', r.rigId) || r.rigName || '';
+function rejectSummaryHTML(curOp) {
+  const k = opKey(curOp), today = isoDay(Date.now());
+  const mine = k ? S.rejects.filter((r) => opKey(r.operator) === k && isoDay(r.rejectedAt) === today).length : 0;
+  return `<a class="rej-sum" id="rejSummary" href="#/rejects"><span>${k ? `Your rejects today: <b id="rejMine">${mine}</b>` : `Rejects logged: <b id="rejMine">${S.rejects.length}</b>`}</span><span class="rej-sum-r">By operator ›</span></a>`;
+}
+async function logReject({ operator, rigId = '', serialNumber = '', note = '' }) {
+  const now = Date.now();
+  const r = { id: 'rj_' + uid(), operator: cleanOp(operator), rejectedAt: now, rigId: rigId || '', rigName: labelOf('rigs', rigId) || '',
+    serialNumber: String(serialNumber || '').trim().toUpperCase(), note: String(note || '').trim(), loggedBy: S.meta.syncName || '', updatedAt: now };
+  await db.put('rejects', r);
+  S.rejects.push(r);
+  markDirty('rejects', r.id);
+  return r;
+}
+async function removeReject(r) {
+  if (!HB_CFG.on) { await db.del('rejects', r.id); S.rejects = S.rejects.filter((x) => x.id !== r.id); return; }
+  const now = Date.now(), tomb = { ...r, deletedAt: now, updatedAt: Math.max(now, (r.updatedAt || 0) + 1) };
+  await db.put('rejects', tomb);
+  S.rejects = S.rejects.filter((x) => x.id !== r.id);
+  markDirty('rejects', r.id); // (counts as pending right away)
+}
+function redrawAfterReject() {
+  const h = location.hash;
+  if (h === '' || h === '#/' || h.startsWith('#/rejects')) { const y = window.scrollY; route(); window.scrollTo(0, y); }
+}
+async function undoReject(r) {
+  await removeReject(r);
+  redrawAfterReject();
+  toast('Reject removed');
+}
+// One tap on "Log rejected wire" + one tap on "Log reject". The operator is pre-picked from the phone; with none set,
+// the same pick-your-name dropdown (or Add new operator) must be used first. Rig / serial / note are optional.
+function logRejectSheet() {
+  const lu = S.meta.lastUsed || {};
+  const rigId = (S.inspection && S.inspection.rigId) || (S.rigs.has(lu.rigId) ? lu.rigId : '');
+  const m = openModal(`<h3>⛔ Log a rejected wire</h3>
+    <p class="muted small">Saved with the operator and the time: <b id="rejWhen">${esc(fmtDate(Date.now()))}</b></p>
+    ${opFieldHTML('rejOp', currentOperator(), { wrapId: 'rejOpField', label: 'Operator' })}
+    <details class="more-box" id="rejMore"><summary>Add details <span class="muted small" id="rejMoreSum"></span></summary>
+      <div class="field"><label for="rejRig">Rig</label><select id="rejRig"><option value="">No rig</option>${opts('rigs', rigId)}</select></div>
+      <div class="field"><label for="rejSerial">Serial number</label><input id="rejSerial" type="text" placeholder="Stamped serial / joint #" autocapitalize="characters" autocorrect="off" spellcheck="false" autocomplete="off"></div>
+      <div class="field"><label for="rejNote">Note</label><input id="rejNote" type="text" maxlength="200" placeholder="e.g. porosity, cracks, bad wire" autocomplete="off"></div>
+    </details>
+    <div class="stack form-actions">
+      <button type="button" class="btn danger solid big block" id="rejOk">⛔ Log reject</button>
+      <button type="button" class="btn ghost block" id="rejCancel">Cancel</button>
+    </div>`);
+  const ctl = bindOpField('rejOp');
+  const sum = () => { const rn = labelOf('rigs', $('#rejRig', m).value); $('#rejMoreSum', m).textContent = `rig, serial, note — optional${rn ? ` · Rig: ${rn}` : ''}`; };
+  sum();
+  $('#rejRig', m).addEventListener('change', sum);
+  $('#rejCancel', m).onclick = () => closeModal(true);
+  $('#rejOk', m).onclick = async () => {
+    const op = ctl.adding ? ctl.commit() : ctl.value;
+    if (!op) { if (!ctl.adding) ctl.say('Pick your name first (or ＋ Add new operator).'); return; }
+    $('#rejOk', m).disabled = true;
+    rememberOperator(op, true);
+    let r;
+    try { r = await logReject({ operator: op, rigId: $('#rejRig', m).value, serialNumber: $('#rejSerial', m).value, note: $('#rejNote', m).value }); }
+    catch (e) { console.error(e); $('#rejOk', m).disabled = false; toast('Could not save: ' + e.message, 5000); return; }
+    closeModal(true);
+    redrawAfterReject();
+    toast(`⛔ Reject logged — ${op}`, 8000, { label: 'Undo', fn: () => undoReject(r) });
+  };
+}
+function renderRejects(key) {
+  if (!key) {
+    setChrome({ title: 'Rejects', back: '#/', bottom: false });
+    const { m, label, none } = rejectCounts();
+    const rows = [...m.entries()].map(([k, n]) => ({ key: k, n, label: opLabel(k, label.get(k)) }));
+    rows.sort((a, b) => b.n - a.n || byText(a.label, b.label));
+    if (none) rows.push({ key: '__none', n: none, label: 'Unassigned (no operator)' });
+    for (const o of rows) o.last = rejectsOf(o.key)[0].rejectedAt;
+    const waiting = (S.meta.rejectBacklog || []).filter((id) => S.rejects.some((r) => r.id === id)).length;
+    view.innerHTML = `
+      <div class="card">
+        <div class="rej-title">⛔ Rejects by operator</div>
+        <div class="muted small" id="rejTotal">${plural(S.rejects.length, 'reject')} logged${Sync.signedIn ? ' by the team' : ' on this phone'}. Tap a name to see the date and time of each one.</div>
+        ${waiting && Sync.signedIn ? `<div class="muted small" id="rejWaiting">${plural(waiting, 'reject')} saved on this phone will be shared with the team automatically once the team library is updated.</div>` : ''}
+      </div>
+      <div id="rejList">${rows.map((o) => `<button type="button" class="list-item rej-row" data-rk="${esc(o.key)}">
+        <div class="meta"><b>${o.key === '__none' ? '' : '👷 '}${esc(o.label)}</b><small>Last: ${esc(fmtDate(o.last))}</small></div>
+        <span class="rej-count" aria-label="${plural(o.n, 'reject')}">${o.n}</span><span class="chev">›</span></button>`).join('')
+        || '<div class="empty" id="rejEmpty">No rejects logged yet.<br>Tap <b>⛔ Log rejected wire</b> to record one.</div>'}</div>
+      <div class="stack form-actions">
+        <button type="button" class="btn reject-btn big block" id="rejLogBtn">⛔ Log rejected wire</button>
+        ${S.rejects.length ? '<button type="button" class="btn ghost block" id="rejCsvBtn">⤓ Rejects list (CSV for Excel)</button>' : ''}
+      </div>`;
+    $('#rejList').onclick = (e) => { const b = e.target.closest('[data-rk]'); if (b) location.hash = '#/rejects/' + encodeURIComponent(b.dataset.rk); };
+    $('#rejLogBtn').onclick = logRejectSheet;
+    const cb = $('#rejCsvBtn'); if (cb) cb.onclick = shareRejectsCsv;
+    return;
+  }
+  const list = rejectsOf(key), name = opLabel(key);
+  setChrome({ title: 'Rejects', back: '#/rejects', bottom: false });
+  view.innerHTML = `
+    <div class="card">
+      <div class="rej-title" id="rejOpName">${key === '__none' ? '' : '👷 '}${esc(name)}</div>
+      <div class="rej-big" id="rejOpCount">${plural(list.length, 'reject')}</div>
+      <button type="button" class="op-link" id="rejPhotos" data-op-filter="${esc(key)}">📷 Show photos</button>
+    </div>
+    <div id="rejItems">${list.map((r) => {
+      const d = [rejectRig(r) ? '📁 ' + esc(rejectRig(r)) : '', r.serialNumber ? 'SN ' + esc(r.serialNumber) : '', esc(r.note || '')].filter(Boolean).join(' · ');
+      return `<div class="list-item rej-item" data-id="${esc(r.id)}"><div class="meta"><b class="rej-when">${esc(fmtDate(r.rejectedAt))}</b>${d ? `<small>${d}</small>` : ''}</div>
+        <button type="button" class="btn ghost rej-del" data-del="${esc(r.id)}" aria-label="Delete this reject">🗑 Delete</button></div>`; }).join('')
+      || '<div class="empty">No rejects.</div>'}</div>`;
+  $('#rejItems').onclick = async (e) => {
+    const b = e.target.closest('[data-del]'); if (!b) return;
+    const r = S.rejects.find((x) => x.id === b.dataset.del); if (!r) return;
+    const ok = await confirmBox({ title: 'Delete this reject?', ok: 'Delete', danger: true,
+      msg: `${esc(fmtDate(r.rejectedAt))} · ${esc(opText(r))}. It comes off the count${Sync.on ? ' on every phone' : ''}.` });
+    if (!ok) return;
+    await removeReject(r);
+    toast('Reject deleted');
+    route();
+  };
+}
+function rejectsCsv() {
+  const rows = [['rejected', 'operator', 'operator_number', 'rig', 'serial_number', 'note', 'logged_by', 'id']];
+  for (const r of S.rejects.slice().sort((a, b) => a.rejectedAt - b.rejectedAt)) {
+    rows.push([isoLocal(r.rejectedAt), cleanOp(r.operator), parseOp(r.operator).num, rejectRig(r), r.serialNumber || '', r.note || '', r.loggedBy || '', r.id]);
+  }
+  return '\ufeff' + rows.map((x) => x.map(csvCell).join(',')).join('\r\n') + '\r\n';
+}
+function rejectsByOperatorCsv() {
+  const { m, label, none } = rejectCounts();
+  const rows = [['operator', 'operator_number', 'rejects', 'last_reject']];
+  const list = [...m.entries()].map(([k, n]) => ({ k, n, l: opLabel(k, label.get(k)) })).sort((a, b) => b.n - a.n || byText(a.l, b.l));
+  for (const o of list) rows.push([o.l, parseOp(o.l).num, o.n, isoLocal(rejectsOf(o.k)[0].rejectedAt)]);
+  if (none) rows.push(['Unassigned (no operator)', '', none, isoLocal(rejectsOf('__none')[0].rejectedAt)]);
+  return '\ufeff' + rows.map((x) => x.map(csvCell).join(',')).join('\r\n') + '\r\n';
+}
+async function shareRejectsCsv() {
+  const d = new Date(), name = `hardband-rejects_${isoDay(d)}_${pad2(d.getHours())}${pad2(d.getMinutes())}.csv`;
+  const blob = new Blob([rejectsCsv()], { type: 'text/csv' });
+  const file = window.File ? new File([blob], name, { type: 'text/csv' }) : null;
+  if (file && navigator.canShare && navigator.share && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); } catch (e) { /* cancelled */ }
+    return;
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  toast('Rejects list downloaded');
+}
+
 /* ================= manage ================= */
 function renderManage(tab) {
   tab = KINDS[tab] ? tab : S.manageTab; S.manageTab = tab;
@@ -1268,6 +1458,7 @@ function teamCardHTML() {
       <b>Team library</b>
       <div class="small" style="margin-top:4px">Signed in as <b id="sbWho">${esc(Sync.session.email || 'team')}</b>${S.meta.syncName ? ` · ${esc(S.meta.syncName)}` : ''}</div>
       <p class="small" id="syncStatusText">${esc(st.long || st.text)}</p>
+      ${(S.meta.rejectBacklog || []).length ? `<p class="muted small" id="rejBacklogNote">${plural(S.meta.rejectBacklog.length, 'reject')} saved on this phone will be shared once the team library has the rejects table (owner: run supabase/migrations/004_rejects.sql).</p>` : ''}
       <div class="row"><button class="btn secondary" id="sbSyncNow">⟳ Sync now</button><button class="btn ghost" id="sbSignOut">Sign out</button></div>
     </div>`;
 }
@@ -1315,8 +1506,8 @@ async function renderBackup() {
     </div>
     <div class="card">
       <b>Export backup ZIP</b>
-      <p class="muted small">Folders <i>Customer/Rig/</i> with full-size JPEGs, plus metadata.csv (opens in Excel) and metadata.json (for restoring). Save it to Files / iCloud Drive / OneDrive, or email it.</p>
-      <button class="btn primary big block" id="exportBtn" ${S.photos.length ? '' : 'disabled'}>⤓ Export ZIP</button>
+      <p class="muted small">Folders <i>Customer/Rig/</i> with full-size JPEGs, plus metadata.csv (opens in Excel), rejects.csv + rejects_by_operator.csv (rejected wires) and metadata.json (for restoring). Save it to Files / iCloud Drive / OneDrive, or email it.</p>
+      <button class="btn primary big block" id="exportBtn" ${S.photos.length || S.rejects.length ? '' : 'disabled'}>⤓ Export ZIP</button>
     </div>
     <div class="card">
       <b>Restore / import</b>
@@ -1360,8 +1551,10 @@ async function exportZip() {
       b.update(`Adding ${i + 1} of ${photos.length}…`, (i + 1) / photos.length * 0.2);
     });
     zip.file('metadata.csv', '\ufeff' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n');
+    if (S.rejects.length) { zip.file('rejects.csv', rejectsCsv()); zip.file('rejects_by_operator.csv', rejectsByOperatorCsv()); }
+    const jsonRejects = S.rejects.slice().sort((a, b2) => a.rejectedAt - b2.rejectedAt).map((r) => ({ ...r, rig: rejectRig(r) }));
     zip.file('metadata.json', JSON.stringify({ app: 'hardband-photos', schema: 1, exportedAt: new Date().toISOString(),
-      customers: [...S.customers.values()], rigs: [...S.rigs.values()], pipeSpecs: [...S.pipeSpecs.values()], photos: jsonPhotos }, null, 2));
+      customers: [...S.customers.values()], rigs: [...S.rigs.values()], pipeSpecs: [...S.pipeSpecs.values()], photos: jsonPhotos, rejects: jsonRejects }, null, 2));
     const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE', mimeType: 'application/zip' }, (m) => b.update('Zipping…', 0.2 + m.percent / 125));
     const d = new Date();
     const name = `hardband-photos-backup_${isoDay(d)}_${pad2(d.getHours())}${pad2(d.getMinutes())}.zip`;
@@ -1369,7 +1562,7 @@ async function exportZip() {
     const file = window.File ? new File([blob], name, { type: 'application/zip' }) : null;
     const canShare = !!(file && navigator.canShare && navigator.canShare({ files: [file] }));
     const markDone = () => setMeta('lastExport', { at: Date.now(), count: photos.length }).then(() => { if (location.hash === '#/backup') renderBackup(); });
-    const m = openModal(`<h3>Backup ready</h3><p class="muted">${photos.length} photos · ${fmtMB(blob.size)}<br><span class="small">${esc(name)}</span>${skippedFiles ? `<br><span class="small">${skippedFiles} full-size photo(s) not downloaded yet (offline) — only their details are included.</span>` : ''}</p>
+    const m = openModal(`<h3>Backup ready</h3><p class="muted">${photos.length} photos${S.rejects.length ? ` · ${plural(S.rejects.length, 'reject')}` : ''} · ${fmtMB(blob.size)}<br><span class="small">${esc(name)}</span>${skippedFiles ? `<br><span class="small">${skippedFiles} full-size photo(s) not downloaded yet (offline) — only their details are included.</span>` : ''}</p>
       <div class="stack form-actions">
         ${canShare ? '<button class="btn primary big block" id="shareZip">⇪ Share / Save to Files</button>' : ''}
         <button class="btn ${canShare ? 'secondary' : 'primary big'} block" id="dlZip">⤓ Download ZIP</button>
@@ -1421,8 +1614,15 @@ async function importZip(file) {
       const rec = { ...clean, blob, thumb, width: w, height: h };
       await putPhoto(rec); S.photos.push(rec); have.add(rec.id); markDirty('photos', rec.id); added++;
     }
+    // Rejects: missing ones are added (same id = already here, even if deleted on this phone since).
+    let addedRej = 0;
+    for (const rm of meta.rejects || []) {
+      if (!rm || !rm.id || await db.get('rejects', rm.id)) continue;
+      const { rig: _rg, deletedAt: _dd, ...rec } = rm;
+      await db.put('rejects', rec); S.rejects.push(rec); markDirty('rejects', rec.id); addedRej++;
+    }
     b.done();
-    toast(`Imported ${added} photo${added === 1 ? '' : 's'}${skipped ? `, ${skipped} already here` : ''}${missing ? `, ${missing} missing` : ''}${addedLk ? `, ${addedLk} rig/customer/spec entries updated` : ''}.`, 5000);
+    toast(`Imported ${added} photo${added === 1 ? '' : 's'}${skipped ? `, ${skipped} already here` : ''}${missing ? `, ${missing} missing` : ''}${addedRej ? `, ${plural(addedRej, 'reject')}` : ''}${addedLk ? `, ${addedLk} rig/customer/spec entries updated` : ''}.`, 5000);
     route();
   } catch (e) { console.error(e); b.done(); toast('Import failed: ' + e.message, 6000); }
 }
