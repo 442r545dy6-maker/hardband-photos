@@ -770,7 +770,7 @@ async function shareComparison(pre, post) {
 // Condition quick-pick buttons (they only add text to the notes box; existing notes are never changed).
 // The set shown depends on the stage: inspection before hardbanding, or the result after hardbanding.
 const CHIPS = {
-  pre: ['No hardband needed', 'Reapply', 'Repair'],
+  pre: ['No hardband needed', 'Reapply', 'Repair', 'Eccentric band'],
   post: ['Good', 'Rejected wire', 'Excessive porosity', 'Cracks', 'Needs repair', 'Eccentric band'],
 };
 const NOTES_HINT = {

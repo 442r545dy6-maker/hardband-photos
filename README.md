@@ -21,7 +21,7 @@ Photos saved before this existed have no stage and count as `post`.
 - The photo form starts with a two-button toggle, *Before hardband (inspection)* / *After hardband*, defaulting to the
   stage used last. After hardband is the original full form with the condition chips Good, Rejected wire, Excessive
   porosity, Cracks, Needs repair, Eccentric band. Before hardband is a short inspection screen: rig + "Before hardband"
-  header, serial number (focused), chips No hardband needed / Reapply / Repair, and everything else under
+  header, serial number (focused), chips No hardband needed / Reapply / Repair / Eccentric band, and everything else under
   *More details*. Switching stage never clears typed notes (chips only add text to the notes).
 - **🔍 Start inspection** (home screen): a sheet whose only required field is the rig name (type it or pick a
   suggestion; a case-insensitive match reuses the rig, otherwise it is created; customer optional, defaults to the
