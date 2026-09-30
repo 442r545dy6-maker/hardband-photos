@@ -54,6 +54,15 @@ This created:
 - a **private** storage bucket called **hardband** for the photos and thumbnails,
 - security rules so that **only signed-in crew** can see or change anything, and **nobody can hard-delete** anything.
 
+### Already set up before the Before/After hardband stage? Run this once
+If your project was created with an older `setup.sql`, add the new **stage** column (Before / After hardband):
+1. **SQL Editor** → new query.
+2. Paste all of `supabase/migrations/002_stage.sql` and click **Run**. It only adds a column; nothing is changed or deleted,
+   and it's safe to run again.
+3. The results show your photos by stage. Older photos show as `null (= post)`, which the app treats as *After hardband*.
+
+Phones keep syncing even before you run it; photos marked *Before hardband* get their stage uploaded afterwards.
+
 ## 4. Create the team login
 1. In the left sidebar, click **Authentication**, then **Users**.
 2. Click **Add user**, then **Create new user**.

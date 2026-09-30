@@ -64,6 +64,7 @@ function photoToRow(p) {
     width: p.width || null, height: p.height || null, orig_name: p.origName || null,
     image_path: p.remoteImage ? `photos/${p.id}.jpg` : null, thumb_path: p.remoteThumb ? `thumbs/${p.id}.jpg` : null,
     client_updated_at: Math.round(stampOf('photos', p)) || 0, deleted_at: tsIso(p.deletedAt), updated_by_name: S.meta.syncName || null,
+    stage: p.stage === 'pre' ? 'pre' : 'post', // 'pre' = before hardband (inspection); photos without a stage count as 'post'
   };
 }
 function applyPhotoRow(p, r) {
@@ -75,6 +76,9 @@ function applyPhotoRow(p, r) {
     updatedAt: Number(r.client_updated_at) || 0, remoteImage: !!r.image_path || !!p.remoteImage, remoteThumb: !!r.thumb_path || !!p.remoteThumb,
   });
   if (r.added_at) p.addedAt = tsMs(r.added_at);
+  // Only a real value changes the stage. A missing/null stage (server not migrated yet, or a row written by an
+  // older app version) keeps whatever this phone already has; photos with no stage at all count as 'post'.
+  if (r.stage === 'pre' || r.stage === 'post') p.stage = r.stage;
   if (r.deleted_at) p.deletedAt = tsMs(r.deleted_at); else delete p.deletedAt;
   if (!('blob' in p)) p.blob = null;
   if (!('thumb' in p)) p.thumb = null;
@@ -100,13 +104,19 @@ async function errText(res) {
   try { const j = await res.clone().json(); return j.msg || j.error_description || j.message || j.error || `HTTP ${res.status}`; }
   catch (e) { return `HTTP ${res.status}`; }
 }
+async function errCode(res) {
+  try { const j = await res.clone().json(); return j.code || j.error_code || ''; } catch (e) { return ''; }
+}
 async function sbFetch(path, { method = 'GET', headers = {}, body, timeout } = {}, retried = false) {
   const tok = await Sync.token();
   const res = await rawFetch(path, { method, body, headers: { apikey: HB_CFG.key, Authorization: 'Bearer ' + tok, ...headers } }, timeout);
   if (res.status === 401 && !retried) { await Sync.refresh(true); return sbFetch(path, { method, headers, body, timeout }, true); }
-  if (!res.ok) throw new SyncError(await errText(res), res.status >= 500 ? 'server' : 'http', res.status);
+  if (!res.ok) { const err = new SyncError(await errText(res), res.status >= 500 ? 'server' : 'http', res.status); err.code = await errCode(res); throw err; }
   return res;
 }
+// The server doesn't have the photos.stage column yet (migration 002_stage.sql not run). PostgREST answers
+// 400 PGRST204 "Could not find the 'stage' column of 'photos' in the schema cache" (42703 on a select).
+const isNoStageCol = (e) => !!e && e.status === 400 && (e.code === 'PGRST204' || e.code === '42703' || /'?stage'? column|column [\w.]*stage/i.test(e.message || ''));
 const upsertRows = (table, rows) => sbFetch(`/rest/v1/${table}?on_conflict=id`, {
   method: 'POST', body: JSON.stringify(rows),
   headers: { 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' } });
@@ -117,7 +127,7 @@ const downloadObj = async (path) => { const res = await sbFetch(objPath(path), {
 
 /* ---------- the engine ---------- */
 const Sync = {
-  on: HB_CFG.on, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
+  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
   get session() { return S.meta.syncSession || null; },
   get signedIn() { return !!(HB_CFG.on && this.session && this.session.refresh_token); },
 
@@ -225,6 +235,7 @@ const Sync = {
   },
 
   async push() {
+    await this.stageCatchUp();
     const entries = (await db.all('outbox')).sort((a, b) => a.at - b.at);
     if (!entries.length) return;
     const order = { customers: 0, rigs: 1, pipeSpecs: 2, photos: 3 };
@@ -253,12 +264,49 @@ const Sync = {
       if (p.blob && !p.remoteImage) { await uploadObj(`photos/${p.id}.jpg`, p.blob); p.remoteImage = true; flags = true; }
       if (p.thumb && !p.remoteThumb) { await uploadObj(`thumbs/${p.id}.jpg`, p.thumb); p.remoteThumb = true; flags = true; }
       if (flags) await putPhoto(p);
-      await upsertRows('photos', [photoToRow(p)]);
+      await this.upsertPhoto(p);
       if (p.deletedAt && (p.blob || p.thumb) && p.remoteImage) { p.blob = null; p.thumb = null; await putPhoto(p); } // the server keeps the file
       await outboxDone(e);
       this.pending = await outboxCount();
     }
     this.phase = '';
+  },
+
+  // Upload one photo row. Until the server has the 'stage' column, send the row without it (so sync never
+  // breaks) and remember the photo, so its stage is uploaded once the column exists.
+  async upsertPhoto(p) {
+    const row = photoToRow(p);
+    if (this.stageCol !== false) {
+      try { await upsertRows('photos', [row]); this.stageCol = true; return; }
+      catch (e) { if (!isNoStageCol(e)) throw e; this.stageCol = false; this.stageCheckedAt = Date.now(); console.warn('sync: server has no photos.stage column yet — uploading without it'); }
+    }
+    const { stage, ...rest } = row;
+    await upsertRows('photos', [rest]);
+    const backlog = S.meta.stageBacklog || [];
+    if (!backlog.includes(p.id)) await setMeta('stageBacklog', backlog.concat(p.id));
+  },
+  // Photos uploaded while the column was missing get their stage filled in once it exists (checked at most every
+  // 5 min). A stage-only PATCH, and only where the server's stage is still empty: it keeps the row's edit time,
+  // so it can't overwrite (or be blocked by) a newer edit from another phone, and never replaces a stage set since.
+  async stageCatchUp() {
+    const backlog = S.meta.stageBacklog || [];
+    if (!backlog.length) return false;
+    if (this.stageCol === false && Date.now() - (this.stageCheckedAt || 0) < 300000) return false;
+    this.stageCheckedAt = Date.now();
+    try { await sbFetch('/rest/v1/photos?select=id,stage&limit=1'); }
+    catch (e) { if (isNoStageCol(e)) { this.stageCol = false; return false; } throw e; }
+    this.stageCol = true;
+    const by = { pre: [], post: [] };
+    for (const id of backlog) { const p = await photoRecord(id); if (p) by[p.stage === 'pre' ? 'pre' : 'post'].push(id); }
+    for (const st of ['pre', 'post']) {
+      for (let i = 0; i < by[st].length; i += 100) {
+        const ids = by[st].slice(i, i + 100).map((x) => `"${String(x).replace(/["\\]/g, '')}"`).join(',');
+        await sbFetch(`/rest/v1/photos?id=in.(${encodeURIComponent(ids)})&stage=is.null`, { method: 'PATCH', body: JSON.stringify({ stage: st }),
+          headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' } });
+      }
+    }
+    await setMeta('stageBacklog', []);
+    return true;
   },
 
   async pull() {

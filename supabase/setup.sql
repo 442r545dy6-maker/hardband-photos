@@ -85,6 +85,18 @@ create table if not exists public.photos (
   updated_by_name   text
 );
 
+-- ---------- migration 002: photo stage (Before / After hardband) ----------
+-- 'pre' = inspection photo BEFORE hardbanding, 'post' = AFTER hardbanding, null = older photo (app treats as 'post').
+-- Same as supabase/migrations/002_stage.sql; covered by the grants/policies below like every other column.
+alter table public.photos add column if not exists stage text;
+do $$
+begin
+  if not exists (select 1 from pg_constraint
+                 where conname = 'photos_stage_check' and conrelid = 'public.photos'::regclass) then
+    alter table public.photos add constraint photos_stage_check check (stage is null or stage in ('pre', 'post'));
+  end if;
+end $$;
+
 -- ---------- indexes (phones pull "changed since" by updated_at) ----------
 create index if not exists customers_updated_at_idx  on public.customers  (updated_at, id);
 create index if not exists rigs_updated_at_idx       on public.rigs       (updated_at, id);
@@ -188,6 +200,9 @@ on conflict (id) do nothing;
 insert into public.pipe_specs (id, description, client_updated_at)
 values ('s_45r3_450duo', '4-1/2" Range 3, 450 Duo', 0)
 on conflict (id) do nothing;
+
+-- Make new/changed columns visible to the app's API right away.
+notify pgrst, 'reload schema';
 
 -- Quick check (shows up under Results):
 select 'customers' as table_name, count(*) from public.customers

@@ -81,7 +81,7 @@ async function putPhoto(p) {
 const S = {
   rigs: new Map(), customers: new Map(), pipeSpecs: new Map(), photos: [], meta: {},
   gone: { rigs: new Map(), customers: new Map(), pipeSpecs: new Map() }, // deleted/merged entries (team sync tombstones)
-  search: { q: '', customerId: '', rigId: '', end: '', from: '', to: '' }, showFilters: false,
+  search: { q: '', customerId: '', rigId: '', end: '', stage: '', from: '', to: '' }, showFilters: false,
   queue: [], qIndex: 0, savedCount: 0, batchValues: null, lastSaved: null, keepJoint: false,
   context: null, addContext: null, lastListHash: '#/', lastList: [], manageTab: 'rigs',
   viewUrls: [], scroll: {}, modalCancel: null,
@@ -94,6 +94,14 @@ const KINDS = {
 const labelOf = (kind, id) => { const it = S[kind].get(id) || S.gone[kind].get(id); return it ? it[KINDS[kind].field] : ''; };
 const sortedItems = (kind) => [...S[kind].values()].sort((a, b) => byText(a[KINDS[kind].field], b[KINDS[kind].field]));
 const countUsing = (kind, id) => S.photos.filter((p) => p[KINDS[kind].ref] === id).length;
+// Photo stage: 'pre' = taken during inspection BEFORE hardbanding, 'post' = AFTER hardbanding.
+// Photos saved before this field existed (no stage) count as 'post'.
+const STAGES = {
+  pre: { label: 'Before hardband (inspection)', short: 'Before', badge: 'BEFORE', words: 'before pre inspection' },
+  post: { label: 'After hardband', short: 'After', badge: 'AFTER', words: 'after post' },
+};
+const stageOf = (p) => (p && p.stage === 'pre' ? 'pre' : 'post');
+const stageBadge = (p, extra = '') => `<span class="stage-badge ${stageOf(p)}${extra ? ' ' + extra : ''}">${STAGES[stageOf(p)].badge}</span>`;
 
 const SEED = {
   customer: { id: 'c_eog', name: 'EOG' },
@@ -398,11 +406,11 @@ window.addEventListener('hashchange', (e) => {
 });
 
 /* ================= home: folders + search ================= */
-const hasSearch = () => { const s = S.search; return !!(s.q.trim() || s.customerId || s.rigId || s.end || s.from || s.to); };
-const filterCount = () => { const s = S.search; return [s.customerId, s.rigId, s.end, s.from, s.to].filter(Boolean).length; };
+const hasSearch = () => { const s = S.search; return !!(s.q.trim() || s.customerId || s.rigId || s.end || s.stage || s.from || s.to); };
+const filterCount = () => { const s = S.search; return [s.customerId, s.rigId, s.end, s.stage, s.from, s.to].filter(Boolean).length; };
 function haystack(p) {
   return [labelOf('customers', p.customerId), labelOf('rigs', p.rigId), (S.rigs.get(p.rigId) || {}).notes, labelOf('pipeSpecs', p.pipeSpecId),
-    p.serialNumber, p.end, p.bandNumber ? 'B' + p.bandNumber : '', p.notes, isoDay(p.createdAt)].join(' \u0001 ').toLowerCase();
+    p.serialNumber, p.end, p.bandNumber ? 'B' + p.bandNumber : '', p.notes, isoDay(p.createdAt), STAGES[stageOf(p)].words].join(' \u0001 ').toLowerCase();
 }
 function searchPhotos() {
   const s = S.search;
@@ -411,6 +419,7 @@ function searchPhotos() {
     if (s.customerId && p.customerId !== s.customerId) return false;
     if (s.rigId && p.rigId !== s.rigId) return false;
     if (s.end && p.end !== s.end) return false;
+    if (s.stage && stageOf(p) !== s.stage) return false;
     const d = isoDay(p.createdAt);
     if (s.from && d < s.from) return false;
     if (s.to && d > s.to) return false;
@@ -423,7 +432,7 @@ const bandText = (p) => [p.end || '', p.bandNumber ? (p.bandNumber === 'All' ? '
 function tileHTML(p, showFolder) {
   const cap = [p.serialNumber || 'no SN', bandText(p)].filter(Boolean).join(' · ');
   const sub = showFolder ? `${labelOf('rigs', p.rigId)} · ${fmtShort(p.createdAt)}` : fmtShort(p.createdAt);
-  return `<a class="tile" href="#/photo/${encodeURIComponent(p.id)}" data-id="${esc(p.id)}"><img loading="lazy" src="${thumbUrl(p)}" alt="${esc(cap)}"><span class="cap">${esc(cap)}<span class="cap2">${esc(sub)}</span></span></a>`;
+  return `<a class="tile" href="#/photo/${encodeURIComponent(p.id)}" data-id="${esc(p.id)}"><img loading="lazy" src="${thumbUrl(p)}" alt="${esc(cap)}">${stageBadge(p, 'on-tile')}<span class="cap">${esc(cap)}<span class="cap2">${esc(sub)}</span></span></a>`;
 }
 const opts = (kind, sel, blank) => (blank ? `<option value="">${esc(blank)}</option>` : '') +
   sortedItems(kind).map((x) => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x[KINDS[kind].field])}</option>`).join('');
@@ -441,7 +450,7 @@ function renderHome() {
       <div><label for="fC">Customer</label><select id="fC">${opts('customers', s.customerId, 'Any customer')}</select></div>
       <div><label for="fR">Rig</label><select id="fR">${opts('rigs', s.rigId, 'Any rig')}</select></div>
       <div><label for="fE">End</label><select id="fE"><option value="">Box or Pin</option><option ${s.end === 'Box' ? 'selected' : ''}>Box</option><option ${s.end === 'Pin' ? 'selected' : ''}>Pin</option></select></div>
-      <div></div>
+      <div><label for="fS">Stage</label><select id="fS"><option value="">Any stage</option><option value="pre" ${s.stage === 'pre' ? 'selected' : ''}>Before</option><option value="post" ${s.stage === 'post' ? 'selected' : ''}>After</option></select></div>
       <div><label for="fFrom">From date</label><input id="fFrom" type="date" value="${esc(s.from)}"></div>
       <div><label for="fTo">To date</label><input id="fTo" type="date" value="${esc(s.to)}"></div>
       <button id="fClear" class="btn ghost full">Clear search &amp; filters</button>
@@ -453,8 +462,8 @@ function renderHome() {
   q.addEventListener('keydown', (e) => { if (e.key === 'Enter') q.blur(); });
   $('#filterBtn').onclick = () => { S.showFilters = !S.showFilters; $('#filters').hidden = !S.showFilters; $('#filterBtn').setAttribute('aria-expanded', S.showFilters); };
   const bind = (id, key) => { $(id).addEventListener('change', (e) => { s[key] = e.target.value; renderHome(); }); };
-  bind('#fC', 'customerId'); bind('#fR', 'rigId'); bind('#fE', 'end'); bind('#fFrom', 'from'); bind('#fTo', 'to');
-  $('#fClear').onclick = () => { Object.assign(s, { q: '', customerId: '', rigId: '', end: '', from: '', to: '' }); renderHome(); };
+  bind('#fC', 'customerId'); bind('#fR', 'rigId'); bind('#fE', 'end'); bind('#fS', 'stage'); bind('#fFrom', 'from'); bind('#fTo', 'to');
+  $('#fClear').onclick = () => { Object.assign(s, { q: '', customerId: '', rigId: '', end: '', stage: '', from: '', to: '' }); renderHome(); };
   renderBanner();
   renderHomeBody();
 }
@@ -536,7 +545,7 @@ function renderFolder(ck, rk) {
       <div class="muted small">${esc(labelOf('customers', ck) || 'No customer')}</div>
       <div style="font-size:22px;font-weight:800" id="folderRigName">${esc(rig ? rig.name : 'No rig')}</div>
       ${rig && rig.notes ? `<div class="muted small" style="margin-top:4px">${esc(rig.notes)}</div>` : ''}
-      <div class="muted small" style="margin-top:6px">${list.length} photo${list.length === 1 ? '' : 's'} · ${groups.length} joint${groups.length === 1 ? '' : 's'}. New photos taken here go in this folder.</div>
+      <div class="muted small" style="margin-top:6px">${list.length} photo${list.length === 1 ? '' : 's'} · ${groups.length} joint${groups.length === 1 ? '' : 's'}${list.length ? ` <span id="folderStages">(${list.filter((p) => stageOf(p) === 'pre').length} before · ${list.filter((p) => stageOf(p) === 'post').length} after)</span>` : ''}. New photos taken here go in this folder.</div>
       ${rig ? `<button class="btn ghost block" id="editRigBtn" style="margin-top:10px">✎ Rename / edit rig</button>` : ''}
     </div>
     ${list.length ? groups.map((g) => `<div class="sn-head">${g.sn ? 'SN ' + esc(g.sn) : 'No serial number'} <span class="muted">(${g.ps.length})</span></div>
@@ -565,6 +574,7 @@ function renderPhoto(id) {
     </div>
     <div class="card" style="margin-top:12px">
       <dl class="kv" id="detailFields">
+        <dt>Stage</dt><dd id="detailStage">${stageBadge(p)} ${esc(STAGES[stageOf(p)].label)}</dd>
         <dt>Customer</dt><dd>${esc(labelOf('customers', p.customerId) || '—')}</dd>
         <dt>Rig</dt><dd>${esc(rig.name || '—')}${rig.notes ? `<div class="muted small">${esc(rig.notes)}</div>` : ''}</dd>
         <dt>Pipe spec</dt><dd>${esc(labelOf('pipeSpecs', p.pipeSpecId) || '—')}</dd>
@@ -610,21 +620,29 @@ function renderPhoto(id) {
 
 /* ================= add / edit form ================= */
 // Condition quick-pick buttons (they only add text to the notes box; existing notes are never changed).
-const CHIPS = ['Good', 'Rejected wire', 'Excessive porosity', 'Cracks', 'Needs repair', 'Eccentric band'];
+// The set shown depends on the stage: inspection before hardbanding, or the result after hardbanding.
+const CHIPS = {
+  pre: ['No hardband needed', 'Reapply', 'Repair'],
+  post: ['Good', 'Rejected wire', 'Excessive porosity', 'Cracks', 'Needs repair', 'Eccentric band'],
+};
+const NOTES_HINT = {
+  pre: 'Inspection: band worn flush, height above OD, cracks…',
+  post: 'Wear, cracks, height above OD, rebuild needed…',
+};
 function renderForm(mode, id) {
   let p = null, item = null, vals;
   if (mode === 'edit') {
     p = S.photos.find((x) => x.id === id);
     if (!p) { location.hash = '#/'; return; }
-    vals = { customerId: p.customerId, rigId: p.rigId, pipeSpecId: p.pipeSpecId, serialNumber: p.serialNumber || '', end: p.end || '', bandNumber: p.bandNumber || '', notes: p.notes || '', createdAt: p.createdAt };
+    vals = { customerId: p.customerId, rigId: p.rigId, pipeSpecId: p.pipeSpecId, serialNumber: p.serialNumber || '', end: p.end || '', bandNumber: p.bandNumber || '', notes: p.notes || '', createdAt: p.createdAt, stage: stageOf(p) };
     setChrome({ title: 'Edit photo', back: `#/photo/${encodeURIComponent(id)}`, bottom: false });
   } else {
     item = S.queue[S.qIndex];
     if (!item) { location.hash = '#/'; return; }
     const lu = S.meta.lastUsed || {};
-    vals = { customerId: lu.customerId || '', rigId: lu.rigId || '', pipeSpecId: lu.pipeSpecId || '', serialNumber: '', end: '', bandNumber: '', notes: '' };
+    vals = { customerId: lu.customerId || '', rigId: lu.rigId || '', pipeSpecId: lu.pipeSpecId || '', serialNumber: '', end: '', bandNumber: '', notes: '', stage: S.meta.lastStage === 'pre' ? 'pre' : 'post' };
     if (S.addContext) Object.assign(vals, S.addContext);
-    if (S.addKeep && S.lastSaved) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '' });
+    if (S.addKeep && S.lastSaved) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '', stage: stageOf(S.lastSaved) });
     if (S.batchValues) Object.assign(vals, { ...S.batchValues, bandNumber: '', notes: '' });
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
   }
@@ -638,20 +656,29 @@ function renderForm(mode, id) {
     <img class="preview" src="${src}" alt="Photo preview">
     <p class="qinfo">${mode === 'add' ? `Taken ${fmtDate(item.createdAt)}${item.dateSource === 'exif' ? ' (from photo)' : ''}` : ''}</p>
     <form id="photoForm" class="card" autocomplete="off">
-      <div class="field"><label for="fCustomer">Customer</label>${selectHTML('customers', 'customerId', 'fCustomer')}</div>
-      <div class="field"><label for="fRig">Rig</label>${selectHTML('rigs', 'rigId', 'fRig')}</div>
-      <div class="field"><label for="fSpec">Pipe spec</label>${selectHTML('pipeSpecs', 'pipeSpecId', 'fSpec')}</div>
-      <div class="field"><label for="fSerial">Serial number</label>
+      <div class="field stage-field"><span class="lbl">Stage</span><div class="seg stage" id="fStage" role="radiogroup" aria-label="Stage">
+        <button type="button" data-v="pre" role="radio"><span>Before hardband</span><small>(inspection)</small></button>
+        <button type="button" data-v="post" role="radio"><span>After hardband</span></button></div></div>
+      <div class="pre-head" id="preHead" hidden></div>
+      <div id="mainFields">
+      <div class="field" id="fldCustomer"><label for="fCustomer">Customer</label>${selectHTML('customers', 'customerId', 'fCustomer')}</div>
+      <div class="field" id="fldRig"><label for="fRig">Rig</label>${selectHTML('rigs', 'rigId', 'fRig')}</div>
+      <div class="field" id="fldSpec"><label for="fSpec">Pipe spec</label>${selectHTML('pipeSpecs', 'pipeSpecId', 'fSpec')}</div>
+      <div class="field" id="fldSerial"><label for="fSerial">Serial number</label>
         <input id="fSerial" type="text" list="snList" value="${esc(vals.serialNumber)}" placeholder="Stamped serial / joint #" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="done">
         <datalist id="snList">${serials.map((s) => `<option value="${esc(s)}">`).join('')}</datalist></div>
-      <div class="field"><span class="lbl">End</span><div class="seg" id="fEnd">
+      <div class="field" id="fldPreChips" hidden><span class="lbl">Condition before hardband</span><div id="preChipSlot"></div>
+        <div class="muted small notes-peek" id="notesPeek" hidden></div></div>
+      <div class="field" id="fldEnd"><span class="lbl">End</span><div class="seg" id="fEnd">
         <button type="button" data-v="Box">Box</button><button type="button" data-v="Pin">Pin</button></div></div>
-      <div class="field"><span class="lbl">Band</span><div class="seg band" id="fBand"></div>
+      <div class="field" id="fldBand"><span class="lbl">Band</span><div class="seg band" id="fBand"></div>
         <div class="band-diagram" id="bandHint"></div></div>
-      <div class="field"><label for="fNotes">Condition / notes</label>
-        <textarea id="fNotes" placeholder="Wear, cracks, height above OD, rebuild needed…">${esc(vals.notes)}</textarea>
-        <div class="chips">${CHIPS.map((c) => `<button type="button" data-chip="${esc(c)}">${esc(c)}</button>`).join('')}</div></div>
-      ${mode === 'edit' ? `<div class="field"><label for="fDate">Date / time taken</label><input id="fDate" type="datetime-local" value="${dtLocalValue(vals.createdAt)}"></div>` : ''}
+      <div class="field" id="fldNotes"><label for="fNotes">Condition / notes</label>
+        <textarea id="fNotes" placeholder="${esc(NOTES_HINT[vals.stage])}">${esc(vals.notes)}</textarea>
+        <div class="chips" id="fChips" data-stage="${vals.stage}"></div></div>
+      ${mode === 'edit' ? `<div class="field" id="fldDate"><label for="fDate">Date / time taken</label><input id="fDate" type="datetime-local" value="${dtLocalValue(vals.createdAt)}"></div>` : ''}
+      </div>
+      <details class="more-box" id="moreBox" hidden><summary>More details <span class="muted small">Box/Pin, band, notes, pipe spec, customer${mode === 'edit' ? ', date' : ''}</span></summary><div id="moreFields"></div></details>
       <div class="stack form-actions">
         ${mode === 'edit'
     ? `<button type="submit" class="btn primary big block" id="saveBtn">Save changes</button><a class="btn ghost block" href="#/photo/${encodeURIComponent(id)}">Cancel</a>`
@@ -661,7 +688,37 @@ function renderForm(mode, id) {
       </div>
     </form>`;
 
-  let end = vals.end, band = vals.bandNumber;
+  let end = vals.end, band = vals.bandNumber, stage = vals.stage;
+  // Before-hardband (inspection) layout: one-line rig header, serial, the Before chips, and everything else
+  // tucked under "More details". After-hardband keeps the original full form. Fields are moved, not re-created,
+  // so switching stage never loses what was typed (notes included); only the quick-pick buttons change.
+  const fld = (x) => $('#fld' + x);
+  const peekNotes = () => { const pk = $('#notesPeek'), v = $('#fNotes').value.trim(); pk.hidden = stage !== 'pre' || !v || $('#moreBox').open; pk.textContent = v ? 'Notes: ' + v : ''; };
+  const drawHead = () => { $('#preHead').innerHTML = `<span class="pre-head-rig">📁 ${esc(labelOf('rigs', $('#fRig').value) || 'No rig')}</span> · ${stageBadge({ stage: 'pre' })} <b>Before hardband</b>`; };
+  const drawStage = () => {
+    $$('#fStage button').forEach((b) => { const on = b.dataset.v === stage; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
+    const ch = $('#fChips'); ch.dataset.stage = stage;
+    ch.innerHTML = CHIPS[stage].map((c) => `<button type="button" data-chip="${esc(c)}">${esc(c)}</button>`).join('');
+    $('#fNotes').placeholder = NOTES_HINT[stage];
+    const pre = stage === 'pre', main = $('#mainFields'), more = $('#moreFields');
+    const order = pre ? ['Serial', 'PreChips'] : ['Customer', 'Rig', 'Spec', 'Serial', 'End', 'Band', 'Notes', 'Date'];
+    order.map(fld).filter(Boolean).forEach((el) => main.appendChild(el));
+    if (pre) ['End', 'Band', 'Notes', 'Spec', 'Customer', 'Rig', 'Date'].map(fld).filter(Boolean).forEach((el) => more.appendChild(el));
+    (pre ? $('#preChipSlot') : fld('Notes')).appendChild(ch);
+    fld('PreChips').hidden = !pre; $('#moreBox').hidden = !pre; $('#preHead').hidden = !pre;
+    if (pre) drawHead();
+    peekNotes();
+  };
+  drawStage();
+  $('#fStage').onclick = (e) => {
+    const b = e.target.closest('button'); if (!b || b.dataset.v === stage) return;
+    stage = b.dataset.v; drawStage();
+    if (stage === 'pre' && !$('#fSerial').value) $('#fSerial').focus();
+  };
+  $('#fRig').addEventListener('change', () => { if (stage === 'pre') drawHead(); });
+  $('#fNotes').addEventListener('input', peekNotes);
+  $('#moreBox').addEventListener('toggle', peekNotes);
+  if (stage === 'pre' && mode === 'add' && !vals.serialNumber) setTimeout(() => { if ($('#fSerial') && !$('#modalRoot').innerHTML) $('#fSerial').focus({ preventScroll: true }); }, 60);
   const drawSeg = () => {
     $$('#fEnd button').forEach((b) => b.classList.toggle('on', b.dataset.v === end));
     const choices = end === 'Pin' ? ['1', '2', 'All'] : ['1', '2', '3', 'All'];
@@ -676,6 +733,7 @@ function renderForm(mode, id) {
     const c = e.target.closest('[data-chip]'); if (!c) return;
     const ta = $('#fNotes'); const cur = ta.value.trim();
     ta.value = cur ? `${cur}${/[.,;]$/.test(cur) ? '' : ','} ${c.dataset.chip}` : c.dataset.chip;
+    peekNotes();
   };
   $$('select[data-kind]').forEach((sel) => {
     let prevVal = sel.value;
@@ -690,7 +748,7 @@ function renderForm(mode, id) {
   });
   const collect = () => ({
     customerId: $('#fCustomer').value.replace('__new', ''), rigId: $('#fRig').value.replace('__new', ''), pipeSpecId: $('#fSpec').value.replace('__new', ''),
-    serialNumber: $('#fSerial').value.trim().toUpperCase(), end, bandNumber: band, notes: $('#fNotes').value.trim(),
+    serialNumber: $('#fSerial').value.trim().toUpperCase(), end, bandNumber: band, notes: $('#fNotes').value.trim(), stage,
   });
   $('#photoForm').onsubmit = async (e) => {
     e.preventDefault();
@@ -728,9 +786,10 @@ async function saveQueued(v) {
   await putPhoto(p);
   S.photos.push(p);
   markDirty('photos', p.id);
-  S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end };
+  S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, stage: v.stage };
   S.savedCount++;
   await setMeta('lastUsed', { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId });
+  if (S.meta.lastStage !== v.stage) await setMeta('lastStage', v.stage); // next photo defaults to the same stage
 }
 function advanceQueue() { S.qIndex++; if (S.qIndex < S.queue.length) { route(); } else finishQueue(); }
 function finishQueue() { S.queue = []; S.qIndex = 0; S.addContext = null; if (S.savedCount) history.replaceState(null, '', '#/saved'); else history.replaceState(null, '', S.lastListHash || '#/'); route(); }
@@ -750,10 +809,12 @@ function renderSaved() {
   view.innerHTML = `
     <div class="saved-hero"><div class="big-emoji">✅</div>
       <h3 id="savedMsg">Saved ${n} photo${n === 1 ? '' : 's'}</h3>
-      <p class="muted">${esc(labelOf('customers', p.customerId) || '—')} / ${esc(labelOf('rigs', p.rigId) || '—')}${p.serialNumber ? ' · SN ' + esc(p.serialNumber) : ''}</p></div>
+      <p class="muted">${esc(labelOf('customers', p.customerId) || '—')} / ${esc(labelOf('rigs', p.rigId) || '—')}${p.serialNumber ? ' · SN ' + esc(p.serialNumber) : ''}</p><p id="savedStage">${stageBadge(p)} ${esc(STAGES[stageOf(p)].label)}</p></div>
     <div class="stack">
-      ${p.serialNumber ? `<label for="camInput" class="btn primary big block" data-keep="1">📷 Same joint (SN ${esc(p.serialNumber)})</label>` : ''}
-      <label for="camInput" class="btn ${p.serialNumber ? 'secondary' : 'primary'} big block" data-keep="0">📷 Next joint</label>
+      ${stageOf(p) === 'pre' ? `<label for="camInput" class="btn primary big block" data-keep="0" id="nextPhotoBtn">📷 Next photo</label>
+      ${p.serialNumber ? `<label for="camInput" class="btn secondary block" data-keep="1">📷 Same joint (SN ${esc(p.serialNumber)})</label>` : ''}`
+    : `${p.serialNumber ? `<label for="camInput" class="btn primary big block" data-keep="1">📷 Same joint (SN ${esc(p.serialNumber)})</label>` : ''}
+      <label for="camInput" class="btn ${p.serialNumber ? 'secondary' : 'primary'} big block" data-keep="0">📷 Next joint</label>`}
       <label for="libInput" class="btn ghost block" data-keep="0">🖼 Add from library</label>
       <a class="btn ghost block" id="openFolderBtn" href="${folderHash}">📁 Open folder</a>
       <a class="btn ghost block" href="#/">Home</a>
@@ -847,7 +908,7 @@ function bindTeamCard() {
 /* ================= backup: export / import ================= */
 function exportFileName(p) {
   const band = p.bandNumber ? (p.bandNumber === 'All' ? 'All' : 'B' + p.bandNumber) : 'B0';
-  return `${isoDay(p.createdAt)}_${safeToken(p.serialNumber) || 'noSN'}_${p.end || 'NoEnd'}-${band}_${p.id}.jpg`;
+  return `${isoDay(p.createdAt)}_${safeToken(p.serialNumber) || 'noSN'}_${p.end || 'NoEnd'}-${band}_${STAGES[stageOf(p)].short}_${p.id}.jpg`;
 }
 const csvCell = (v) => { const s = String(v ?? ''); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 async function renderBackup() {
@@ -895,16 +956,16 @@ async function exportZip() {
       try { await Sync.ensureBlob(need[i]); } catch (e) { /* skipped below */ }
     }
     let skippedFiles = 0;
-    const rows = [['file', 'id', 'taken', 'customer', 'rig', 'rig_notes', 'pipe_spec', 'serial_number', 'end', 'band', 'condition_notes', 'added']];
+    const rows = [['file', 'id', 'taken', 'stage', 'customer', 'rig', 'rig_notes', 'pipe_spec', 'serial_number', 'end', 'band', 'condition_notes', 'added']];
     const jsonPhotos = [];
     photos.forEach((p, i) => {
       const rig = S.rigs.get(p.rigId) || {};
       const path = `${safeName(labelOf('customers', p.customerId) || 'No customer')}/${safeName(rig.name || 'No rig')}/${exportFileName(p)}`;
       if (p.blob) zip.file(path, p.blob, { binary: true, date: new Date(p.createdAt) }); else skippedFiles++;
-      rows.push([path, p.id, isoLocal(p.createdAt), labelOf('customers', p.customerId), rig.name || '', rig.notes || '', labelOf('pipeSpecs', p.pipeSpecId),
+      rows.push([path, p.id, isoLocal(p.createdAt), STAGES[stageOf(p)].label, labelOf('customers', p.customerId), rig.name || '', rig.notes || '', labelOf('pipeSpecs', p.pipeSpecId),
         p.serialNumber || '', p.end || '', p.bandNumber || '', p.notes || '', p.addedAt ? isoLocal(p.addedAt) : '']);
       const { blob, thumb, ...meta } = p;
-      jsonPhotos.push({ ...meta, file: path, customer: labelOf('customers', p.customerId), rig: rig.name || '', pipeSpec: labelOf('pipeSpecs', p.pipeSpecId) });
+      jsonPhotos.push({ ...meta, stage: stageOf(p), file: path, customer: labelOf('customers', p.customerId), rig: rig.name || '', pipeSpec: labelOf('pipeSpecs', p.pipeSpecId) });
       b.update(`Adding ${i + 1} of ${photos.length}…`, (i + 1) / photos.length * 0.2);
     });
     zip.file('metadata.csv', '\ufeff' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n');
