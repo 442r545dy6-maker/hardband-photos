@@ -161,6 +161,18 @@ textarea { min-height: 96px; resize: vertical; }
 .stage-badge.pre { background: var(--steel); color: #fff; }
 .stage-badge.post { background: var(--accent); color: #111; }
 .tile .stage-badge.on-tile { position: absolute; top: 4px; left: 4px; font-size: 11px; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
+.stage-badge.big { font-size: 15px; padding: 2px 10px; }
+/* Before / After comparison: stacked on phones, side by side in landscape / wide screens */
+.compare { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+@media (orientation: landscape) and (min-width: 560px), (min-width: 760px) { .compare { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.cmp-panel { background: var(--card); border-radius: var(--radius); padding: 10px; box-shadow: 0 1px 2px rgba(0,0,0,.06); min-width: 0; }
+.cmp-label { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 17px; margin: 2px 2px 8px; color: var(--steel); }
+.cmp-img { width: 100%; max-height: 52vh; object-fit: contain; background: #111; border-radius: 10px; display: block; }
+.cmp-swap { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.cmp-swap .btn { min-height: 44px; padding: 0 12px; font-size: 15px; flex: none; }
+.cmp-kv { margin-top: 10px; }
+.cmp-notes { white-space: pre-wrap; }
+.pair-mark { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; min-height: 30px; margin-left: 6px; padding: 0 8px; border-radius: 8px; background: var(--steel); color: #fff; text-decoration: none; font-size: 16px; font-weight: 800; vertical-align: middle; }
 .tile .cap2 { display: block; font-weight: 400; opacity: .9; }
 .sn-head { margin: 14px 4px 6px; font-weight: 700; font-size: 16px; color: var(--steel); }
 .result-count { margin: 12px 4px 8px; color: var(--muted); font-size: 15px; }

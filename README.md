@@ -31,6 +31,12 @@ Photos saved before this existed have no stage and count as `post`.
   until Done is tapped or the user goes back to the home screen.
 - Tiles, the photo detail and the saved screen show a BEFORE / AFTER badge. Search matches "before", "pre",
   "inspection" / "after", "post", and the Filter sheet has a Stage filter.
+- **Compare Before / After**: a photo whose serial (ignoring case and spaces) also has a photo of the other stage gets
+  a *⇄ Compare Before / After* button (and its joint in the folder a ⇄ marker). The comparison shows both photos with
+  BEFORE / AFTER labels, serial, rig, customer, date and condition notes: stacked on a phone, side by side in
+  landscape. With several photos of one stage it starts with the newest and *⇆ Show older* cycles through them.
+  *Share / Save comparison* draws one JPEG (canvas) and shares it with `navigator.share` (files), else downloads it.
+  Folder joints are grouped by that same serial key.
 - Export: `stage` column in metadata.csv, `stage` in metadata.json, and `_Before_` / `_After_` in JPEG file names.
 - Team sync: `stage` column on `photos` (`supabase/migrations/002_stage.sql`). Until that migration is run, the app
   uploads rows without `stage` (it detects PostgREST's `PGRST204` "Could not find the 'stage' column") and re-uploads

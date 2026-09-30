@@ -396,6 +396,7 @@ function route() {
     if (v === '') renderHome();
     else if (v === 'folder') renderFolder(parts[1], parts[2]);
     else if (v === 'photo') renderPhoto(parts[1]);
+    else if (v === 'compare') renderCompare(parts[1], parts[2]);
     else if (v === 'edit') renderForm('edit', parts[1]);
     else if (v === 'add') renderForm('add');
     else if (v === 'saved') renderSaved();
@@ -530,12 +531,29 @@ function renderHomeBody() {
 
 /* ================= folder ================= */
 function folderPhotos(ck, rk) { return S.photos.filter((p) => (p.customerId || '') === (ck || '') && (p.rigId || '') === (rk || '')); }
+// Same joint = same serial ignoring case and spaces ("xj 778" = "XJ778").
+const serialKey = (s) => String(s || '').replace(/\s+/g, '').toUpperCase();
 function jointGroups(list) {
   const m = new Map();
-  for (const p of list) { const k = p.serialNumber || ''; if (!m.has(k)) m.set(k, []); m.get(k).push(p); }
-  const endOrd = { Box: 0, Pin: 1 };
-  const groups = [...m.entries()].map(([sn, ps]) => ({ sn, ps: ps.sort((a, b) => (endOrd[a.end] ?? 2) - (endOrd[b.end] ?? 2) || String(a.bandNumber).localeCompare(String(b.bandNumber)) || a.createdAt - b.createdAt), latest: Math.max(...ps.map((p) => p.createdAt)) }));
+  for (const p of list) { const k = serialKey(p.serialNumber); if (!m.has(k)) m.set(k, []); m.get(k).push(p); }
+  const endOrd = { Box: 0, Pin: 1 }, stOrd = { pre: 0, post: 1 };
+  const groups = [...m.entries()].map(([key, ps]) => ({ key, sn: ps.slice().sort((a, b) => b.createdAt - a.createdAt)[0].serialNumber || '',
+    ps: ps.sort((a, b) => stOrd[stageOf(a)] - stOrd[stageOf(b)] || (endOrd[a.end] ?? 2) - (endOrd[b.end] ?? 2) || String(a.bandNumber).localeCompare(String(b.bandNumber)) || a.createdAt - b.createdAt), latest: Math.max(...ps.map((p) => p.createdAt)) }));
   return groups.sort((a, b) => b.latest - a.latest);
+}
+// Before / After photos of one joint (all folders), newest first. null if the serial is blank.
+function jointStages(sn) {
+  const k = serialKey(sn);
+  if (!k) return null;
+  const all = S.photos.filter((x) => serialKey(x.serialNumber) === k).sort((a, b) => b.createdAt - a.createdAt);
+  return { pre: all.filter((x) => stageOf(x) === 'pre'), post: all.filter((x) => stageOf(x) === 'post') };
+}
+// Compare link for a photo: this photo on its side, the newest photo of the other stage on the other side.
+function compareHash(p) {
+  const j = jointStages(p.serialNumber);
+  if (!j || !j.pre.length || !j.post.length) return '';
+  const pre = stageOf(p) === 'pre' ? p : j.pre[0], post = stageOf(p) === 'post' ? p : j.post[0];
+  return `#/compare/${encodeURIComponent(pre.id)}/${encodeURIComponent(post.id)}`;
 }
 function renderFolder(ck, rk) {
   const list = folderPhotos(ck, rk);
@@ -553,8 +571,8 @@ function renderFolder(ck, rk) {
       <div class="muted small" style="margin-top:6px">${list.length} photo${list.length === 1 ? '' : 's'} · ${groups.length} joint${groups.length === 1 ? '' : 's'}${list.length ? ` <span id="folderStages">(${list.filter((p) => stageOf(p) === 'pre').length} before · ${list.filter((p) => stageOf(p) === 'post').length} after)</span>` : ''}. New photos taken here go in this folder.</div>
       ${rig ? `<button class="btn ghost block" id="editRigBtn" style="margin-top:10px">✎ Rename / edit rig</button>` : ''}
     </div>
-    ${list.length ? groups.map((g) => `<div class="sn-head">${g.sn ? 'SN ' + esc(g.sn) : 'No serial number'} <span class="muted">(${g.ps.length})</span></div>
-      <div class="grid">${g.ps.map((p) => tileHTML(p, false)).join('')}</div>`).join('') : '<div class="empty">No photos in this folder.</div>'}`;
+    ${list.length ? groups.map((g) => { const ch = g.key ? compareHash(g.ps.find((x) => stageOf(x) === 'post') || g.ps[0]) : ''; return `<div class="sn-head">${g.sn ? 'SN ' + esc(g.sn) : 'No serial number'} <span class="muted">(${g.ps.length})</span>${ch ? ` <a class="pair-mark" href="${ch}" title="Before and After photos — compare" aria-label="Compare Before / After">⇄</a>` : ''}</div>
+      <div class="grid">${g.ps.map((p) => tileHTML(p, false)).join('')}</div>`; }).join('') : '<div class="empty">No photos in this folder.</div>'}`;
   const eb = $('#editRigBtn'); if (eb) eb.onclick = () => editLookupDialog('rigs', rk);
 }
 
@@ -592,6 +610,7 @@ function renderPhoto(id) {
       </dl>
     </div>
     <div class="stack form-actions">
+      ${compareHash(p) ? `<a class="btn secondary block" id="compareBtn" href="${compareHash(p)}">⇄ Compare Before / After</a>` : ''}
       <a class="btn primary big block" id="editBtn" href="#/edit/${encodeURIComponent(p.id)}">✎ Edit details / move</a>
       ${canShare ? '<button class="btn secondary block" id="shareBtn">⇪ Share / save to Photos</button>' : ''}
       <a class="btn ghost block" href="${folderHash}">📁 Open folder</a>
@@ -621,6 +640,130 @@ function renderPhoto(id) {
     toast('Photo deleted');
     location.hash = folderPhotos(p.customerId, p.rigId).length ? folderHash : '#/';
   };
+}
+
+/* ================= Before / After comparison ================= */
+function renderCompare(preId, postId) {
+  const pre = S.photos.find((x) => x.id === preId), post = S.photos.find((x) => x.id === postId);
+  const back = () => { if (history.length > 1) history.back(); else location.hash = '#/'; };
+  if (!pre || !post) { setChrome({ title: 'Compare', back, bottom: false }); view.innerHTML = '<div class="empty">Photo not found.</div>'; return; }
+  const j = jointStages(pre.serialNumber) || { pre: [pre], post: [post] };
+  if (!j.pre.includes(pre)) j.pre.unshift(pre);
+  if (!j.post.includes(post)) j.post.unshift(post);
+  setChrome({ title: pre.serialNumber || post.serialNumber ? `⇄ SN ${post.serialNumber || pre.serialNumber}` : 'Compare', back, bottom: false });
+  const panel = (p, st) => {
+    const list = j[st], i = list.indexOf(p), rig = S.rigs.get(p.rigId) || S.gone.rigs.get(p.rigId) || {};
+    const src = p.blob ? viewUrl(p.blob) : p.thumb ? viewUrl(p.thumb) : '';
+    return `<section class="cmp-panel" id="cmp-${st}" data-id="${esc(p.id)}">
+      <div class="cmp-label">${stageBadge({ stage: st }, 'big')} <span>${st === 'pre' ? 'Before hardband' : 'After hardband'}</span></div>
+      <a href="#/photo/${encodeURIComponent(p.id)}"><img class="cmp-img" id="cmpImg-${st}" src="${src}" alt="${st === 'pre' ? 'Before' : 'After'} hardband photo"></a>
+      ${list.length > 1 ? `<div class="cmp-swap"><span class="muted small" id="cmpCount-${st}">${i + 1} of ${list.length} ${st === 'pre' ? 'Before' : 'After'} photos</span>
+        <button type="button" class="btn ghost" data-swap="${st}" id="cmpSwap-${st}">⇆ Show ${i + 1 < list.length ? 'older' : 'newest'}</button></div>` : ''}
+      <dl class="kv cmp-kv">
+        <dt>Serial #</dt><dd>${esc(p.serialNumber || '—')}</dd>
+        <dt>Rig</dt><dd>${esc(rig.name || '—')}</dd>
+        <dt>Customer</dt><dd>${esc(labelOf('customers', p.customerId) || '—')}</dd>
+        <dt>Taken</dt><dd>${fmtDate(p.createdAt)}</dd>
+        <dt>Where</dt><dd>${esc(bandText(p) || '—')}</dd>
+        <dt>Condition</dt><dd class="cmp-notes">${esc(p.notes || '—')}</dd>
+      </dl></section>`;
+  };
+  view.innerHTML = `<div class="compare" id="compare">${panel(pre, 'pre')}${panel(post, 'post')}</div>
+    <div class="stack form-actions">
+      <button class="btn primary big block" id="shareCmpBtn">⇪ Share / Save comparison</button>
+    </div>`;
+  for (const [p, st] of [[pre, 'pre'], [post, 'post']]) {
+    if (p.blob) continue;
+    Sync.ensureBlob(p).then((b) => { const im = $(`#cmpImg-${st}`); if (b && im && location.hash.startsWith('#/compare/')) im.src = viewUrl(b); }).catch(() => {});
+  }
+  $('#compare').onclick = (e) => {
+    const b = e.target.closest('[data-swap]'); if (!b) return;
+    const st = b.dataset.swap, list = j[st], cur = st === 'pre' ? pre : post;
+    const nxt = list[(list.indexOf(cur) + 1) % list.length];
+    const ids = st === 'pre' ? [nxt.id, post.id] : [pre.id, nxt.id];
+    history.replaceState(null, '', `#/compare/${ids.map(encodeURIComponent).join('/')}`);
+    renderCompare(...ids);
+  };
+  $('#shareCmpBtn').onclick = () => shareComparison(pre, post);
+}
+function wrapText(ctx, text, maxW, maxLines) {
+  const out = [];
+  for (const para of String(text || '').split(/\n/)) {
+    let line = '';
+    for (const word of para.split(/\s+/).filter(Boolean)) {
+      const t = line ? line + ' ' + word : word;
+      if (ctx.measureText(t).width <= maxW || !line) line = t; else { out.push(line); line = word; }
+    }
+    out.push(line);
+  }
+  if (out.length > maxLines) { out.length = maxLines; out[maxLines - 1] = out[maxLines - 1].replace(/.{0,2}$/, '') + '…'; }
+  return out;
+}
+// One JPEG: header (serial, rig, customer), Before | After photos side by side, and under each its label,
+// date, rig/customer and condition notes.
+async function buildComparisonJpeg(pre, post) {
+  const blobs = [];
+  for (const p of [pre, post]) blobs.push(p.blob || await Sync.ensureBlob(p).catch(() => null) || p.thumb);
+  if (!blobs[0] || !blobs[1]) throw new Error('Photo not downloaded yet — try again when online.');
+  const imgs = [await loadImage(blobs[0]), await loadImage(blobs[1])];
+  const W = 1600, pad = 32, colW = (W - pad * 3) / 2, font = '-apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+  const imgH = Math.round(Math.min(colW * 1.25, Math.max(...imgs.map((im) => colW * im.naturalHeight / im.naturalWidth))));
+  const meas = document.createElement('canvas').getContext('2d');
+  meas.font = `26px ${font}`;
+  const noteLines = [pre, post].map((p) => wrapText(meas, 'Condition: ' + (p.notes || '—'), colW, 8));
+  const rigName = (p) => (S.rigs.get(p.rigId) || S.gone.rigs.get(p.rigId) || {}).name || '—';
+  const sameWhere = rigName(pre) === rigName(post) && pre.customerId === post.customerId;
+  const headH = 130, textH = 60 + 40 + (sameWhere ? 0 : 38) + Math.max(...noteLines.map((l) => l.length)) * 34 + pad;
+  const H = headH + imgH + textH + 44;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#1f2a36'; ctx.fillRect(0, 0, W, headH - 20);
+  ctx.fillStyle = '#ffffff'; ctx.textBaseline = 'top';
+  ctx.font = `bold 44px ${font}`;
+  ctx.fillText(`SN ${post.serialNumber || pre.serialNumber || '—'}  ·  Before / After hardband`, pad, 18);
+  ctx.font = `28px ${font}`;
+  ctx.fillText(sameWhere ? `Rig ${rigName(post)}  ·  Customer ${labelOf('customers', post.customerId) || '—'}` : 'Hardband Photos comparison', pad, 70);
+  [pre, post].forEach((p, k) => {
+    const x = pad + k * (colW + pad), y = headH, im = imgs[k];
+    ctx.fillStyle = '#111111'; ctx.fillRect(x, y, colW, imgH);
+    const s = Math.min(colW / im.naturalWidth, imgH / im.naturalHeight), w = im.naturalWidth * s, h = im.naturalHeight * s;
+    ctx.drawImage(im, x + (colW - w) / 2, y + (imgH - h) / 2, w, h);
+    const st = k === 0 ? 'pre' : 'post';
+    ctx.font = `bold 30px ${font}`;
+    const lbl = STAGES[st].badge, lw = ctx.measureText(lbl).width + 28;
+    ctx.fillStyle = st === 'pre' ? '#1f2a36' : '#f58220'; ctx.fillRect(x + 14, y + 14, lw, 46);
+    ctx.fillStyle = st === 'pre' ? '#ffffff' : '#111111'; ctx.fillText(lbl, x + 28, y + 22);
+    let ty = y + imgH + 18;
+    ctx.fillStyle = '#111820'; ctx.font = `bold 30px ${font}`;
+    ctx.fillText(st === 'pre' ? 'Before hardband (inspection)' : 'After hardband', x, ty); ty += 42;
+    ctx.font = `26px ${font}`; ctx.fillStyle = '#333d47';
+    ctx.fillText(`${isoLocal(p.createdAt)}${bandText(p) ? '  ·  ' + bandText(p) : ''}${p.serialNumber ? '  ·  SN ' + p.serialNumber : ''}`, x, ty); ty += 38;
+    if (!sameWhere) { ctx.fillText(`Rig ${rigName(p)}  ·  ${labelOf('customers', p.customerId) || 'No customer'}`, x, ty); ty += 38; }
+    ctx.fillStyle = '#111820';
+    for (const line of noteLines[k]) { ctx.fillText(line, x, ty); ty += 34; }
+  });
+  ctx.fillStyle = '#5b6773'; ctx.font = `22px ${font}`;
+  ctx.fillText(`Hardband Photos · made ${isoLocal(Date.now())}`, pad, H - 36);
+  const blob = await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('Image encode failed'))), 'image/jpeg', 0.88));
+  c.width = c.height = 0;
+  return blob;
+}
+async function shareComparison(pre, post) {
+  const b = busy('Making comparison…');
+  let blob;
+  try { blob = await buildComparisonJpeg(pre, post); } catch (e) { b.done(); toast(e.message, 5000); return; }
+  b.done();
+  const name = `${isoDay(post.createdAt)}_${safeToken(serialKey(post.serialNumber || pre.serialNumber)) || 'noSN'}_Before-After.jpg`;
+  const file = window.File ? new File([blob], name, { type: 'image/jpeg' }) : null;
+  if (file && navigator.canShare && navigator.share && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); } catch (e) { /* cancelled */ }
+    return;
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  toast('Comparison saved (download)');
 }
 
 /* ================= add / edit form ================= */
