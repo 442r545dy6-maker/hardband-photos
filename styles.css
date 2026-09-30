@@ -73,6 +73,33 @@ body.with-insp-btn { padding-bottom: calc(170px + var(--safe-b)); }
 .insp-bar .insp-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .insp-bar .insp-done { min-height: 44px; padding: 0 16px; flex: none; }
 .insp-msg { color: var(--danger); min-height: 1.2em; margin-top: 4px; }
+/* ---------- operator ---------- */
+.op-chip { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 52px; margin: 10px 0 0; padding: 6px 14px;
+  border: 2px solid var(--line); border-radius: var(--radius); background: #fff; color: var(--ink); font: inherit; font-size: 17px; text-align: left; cursor: pointer; }
+.op-chip b { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.op-chip .op-chip-l { color: var(--muted); font-size: 15px; }
+.op-chip .op-chip-c { color: var(--muted); }
+.op-chip.unset { border-color: var(--accent); background: #fff4ea; }
+.op-chip.unset b { color: var(--accent-dark); }
+.op-field select { font-weight: 700; }
+.op-add { margin-top: 10px; padding: 12px; border: 2px dashed var(--accent); border-radius: 12px; background: #fffaf5; }
+.op-add-row { display: grid; grid-template-columns: 1fr 7.5em; gap: 10px; }
+.op-add-row > div { min-width: 0; }
+.op-add-row label { display: block; font-weight: 700; font-size: 15px; margin: 0 2px 6px; color: var(--steel); }
+.op-add-row input { width: 100%; min-width: 0; }
+.op-add-num input { font-size: 22px; font-weight: 800; letter-spacing: .04em; text-align: center; }
+.op-add-actions { margin-top: 10px; }
+.op-add-actions .btn { flex: 1; }
+.op-msg { color: var(--danger); margin-top: 6px; }
+.op-msg:empty { display: none; }
+.op-msg .op-use { margin-top: 8px; }
+.op-link { display: inline-flex; align-items: center; gap: 4px; min-height: 40px; padding: 4px 12px; border: 2px solid var(--line); border-radius: 20px;
+  background: #fff; color: var(--ink); font: inherit; font-weight: 700; font-size: 16px; cursor: pointer; text-align: left; }
+.op-link:active { background: #ffe9d6; }
+.op-link.none { color: var(--muted); font-weight: 600; border-style: dashed; }
+.insp-op { font-weight: 600; }
+.pre-head-op { white-space: nowrap; }
+.op-clear { min-height: 40px; padding: 0 10px; margin-left: 6px; font-size: 15px; }
 #bottombar #libBtn { flex: 1; white-space: nowrap; padding: 0 10px; }
 #fSerial { text-transform: uppercase; font-weight: 700; letter-spacing: .5px; }
 #fSerial::placeholder { text-transform: none; font-weight: 400; letter-spacing: 0; }

@@ -65,6 +65,7 @@ function photoToRow(p) {
     image_path: p.remoteImage ? `photos/${p.id}.jpg` : null, thumb_path: p.remoteThumb ? `thumbs/${p.id}.jpg` : null,
     client_updated_at: Math.round(stampOf('photos', p)) || 0, deleted_at: tsIso(p.deletedAt), updated_by_name: S.meta.syncName || null,
     stage: p.stage === 'pre' ? 'pre' : 'post', // 'pre' = before hardband (inspection); photos without a stage count as 'post'
+    operator: String(p.operator || '').trim().replace(/\s+/g, ' ') || null, // "Name Number", e.g. "Dusty 104" (migration 003)
   };
 }
 function applyPhotoRow(p, r) {
@@ -79,6 +80,13 @@ function applyPhotoRow(p, r) {
   // Only a real value changes the stage. A missing/null stage (server not migrated yet, or a row written by an
   // older app version) keeps whatever this phone already has; photos with no stage at all count as 'post'.
   if (r.stage === 'pre' || r.stage === 'post') p.stage = r.stage;
+  // Operator: a real value always wins. An empty one clears it, except while this phone still has to upload its
+  // operator (it was saved before the server had the column) — then the local value is kept until the catch-up.
+  // No 'operator' key at all = server not migrated yet: keep what this phone has.
+  if ('operator' in r) {
+    if (r.operator) p.operator = String(r.operator);
+    else if (!(S.meta.operatorBacklog || []).includes(r.id)) p.operator = '';
+  }
   if (r.deleted_at) p.deletedAt = tsMs(r.deleted_at); else delete p.deletedAt;
   if (!('blob' in p)) p.blob = null;
   if (!('thumb' in p)) p.thumb = null;
@@ -114,9 +122,16 @@ async function sbFetch(path, { method = 'GET', headers = {}, body, timeout } = {
   if (!res.ok) { const err = new SyncError(await errText(res), res.status >= 500 ? 'server' : 'http', res.status); err.code = await errCode(res); throw err; }
   return res;
 }
-// The server doesn't have the photos.stage column yet (migration 002_stage.sql not run). PostgREST answers
-// 400 PGRST204 "Could not find the 'stage' column of 'photos' in the schema cache" (42703 on a select).
-const isNoStageCol = (e) => !!e && e.status === 400 && (e.code === 'PGRST204' || e.code === '42703' || /'?stage'? column|column [\w.]*stage/i.test(e.message || ''));
+// Photo columns added by later migrations: stage (002_stage.sql), operator (003_operator.sql). Until a migration is
+// run, PostgREST answers 400 PGRST204 "Could not find the 'stage' column of 'photos' in the schema cache"
+// (42703 "column photos.stage does not exist" on a select). missingCol() tells which column the server lacks.
+const OPT_COLS = ['stage', 'operator'];
+const missingCol = (e) => {
+  if (!e || e.status !== 400) return '';
+  const msg = e.message || '';
+  return OPT_COLS.find((c) => new RegExp(`'${c}' column|column [\\w."]*\\b${c}\\b`, 'i').test(msg)) || '';
+};
+const isNoStageCol = (e) => missingCol(e) === 'stage';
 const upsertRows = (table, rows) => sbFetch(`/rest/v1/${table}?on_conflict=id`, {
   method: 'POST', body: JSON.stringify(rows),
   headers: { 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' } });
@@ -127,7 +142,7 @@ const downloadObj = async (path) => { const res = await sbFetch(objPath(path), {
 
 /* ---------- the engine ---------- */
 const Sync = {
-  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
+  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, operatorCol: null, operatorCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
   get session() { return S.meta.syncSession || null; },
   get signedIn() { return !!(HB_CFG.on && this.session && this.session.refresh_token); },
 
@@ -236,6 +251,7 @@ const Sync = {
 
   async push() {
     await this.stageCatchUp();
+    await this.operatorCatchUp();
     const entries = (await db.all('outbox')).sort((a, b) => a.at - b.at);
     if (!entries.length) return;
     const order = { customers: 0, rigs: 1, pipeSpecs: 2, photos: 3 };
@@ -272,18 +288,52 @@ const Sync = {
     this.phase = '';
   },
 
-  // Upload one photo row. Until the server has the 'stage' column, send the row without it (so sync never
-  // breaks) and remember the photo, so its stage is uploaded once the column exists.
+  // Upload one photo row. Until the server has the 'stage' / 'operator' column, send the row without it (so sync
+  // never breaks) and remember the photo, so that value is uploaded once the column exists.
   async upsertPhoto(p) {
-    const row = photoToRow(p);
-    if (this.stageCol !== false) {
-      try { await upsertRows('photos', [row]); this.stageCol = true; return; }
-      catch (e) { if (!isNoStageCol(e)) throw e; this.stageCol = false; this.stageCheckedAt = Date.now(); console.warn('sync: server has no photos.stage column yet — uploading without it'); }
+    const row = photoToRow(p), dropped = [];
+    for (const c of OPT_COLS) if (this[c + 'Col'] === false) { delete row[c]; dropped.push(c); }
+    for (;;) {
+      try { await upsertRows('photos', [row]); break; }
+      catch (e) {
+        const c = missingCol(e);
+        if (!c || !(c in row)) throw e;
+        this[c + 'Col'] = false; this[c + 'CheckedAt'] = Date.now();
+        console.warn(`sync: server has no photos.${c} column yet — uploading without it`);
+        delete row[c]; dropped.push(c);
+      }
     }
-    const { stage, ...rest } = row;
-    await upsertRows('photos', [rest]);
-    const backlog = S.meta.stageBacklog || [];
-    if (!backlog.includes(p.id)) await setMeta('stageBacklog', backlog.concat(p.id));
+    for (const c of OPT_COLS) if (c in row) this[c + 'Col'] = true;
+    for (const c of dropped) {
+      if (c === 'operator' && !photoToRow(p).operator) continue; // no operator on this photo: nothing to fill in later
+      const key = c + 'Backlog', backlog = S.meta[key] || [];
+      if (!backlog.includes(p.id)) await setMeta(key, backlog.concat(p.id));
+    }
+  },
+  // Same idea for the operator (migration 003_operator.sql): an operator-only PATCH where the server's operator is
+  // still empty, so it never overwrites an operator set since by another phone and keeps the row's edit time.
+  async operatorCatchUp() {
+    const backlog = S.meta.operatorBacklog || [];
+    if (!backlog.length) return false;
+    if (this.operatorCol === false && Date.now() - (this.operatorCheckedAt || 0) < 300000) return false;
+    this.operatorCheckedAt = Date.now();
+    try { await sbFetch('/rest/v1/photos?select=id,operator&limit=1'); }
+    catch (e) { if (missingCol(e) === 'operator') { this.operatorCol = false; return false; } throw e; }
+    this.operatorCol = true;
+    const by = new Map();
+    for (const id of backlog) {
+      const p = await photoRecord(id), v = p && photoToRow(p).operator;
+      if (v) { if (!by.has(v)) by.set(v, []); by.get(v).push(id); }
+    }
+    for (const [v, list] of by) {
+      for (let i = 0; i < list.length; i += 100) {
+        const ids = list.slice(i, i + 100).map((x) => `"${String(x).replace(/["\\]/g, '')}"`).join(',');
+        await sbFetch(`/rest/v1/photos?id=in.(${encodeURIComponent(ids)})&operator=is.null`, { method: 'PATCH', body: JSON.stringify({ operator: v }),
+          headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' } });
+      }
+    }
+    await setMeta('operatorBacklog', []);
+    return true;
   },
   // Photos uploaded while the column was missing get their stage filled in once it exists (checked at most every
   // 5 min). A stage-only PATCH, and only where the server's stage is still empty: it keeps the row's edit time,
@@ -353,7 +403,9 @@ const Sync = {
         if (!p) p = await photoRecord(r.id);
         const lts = stampOf('photos', p);
         if (p && dirty && lts > rts) continue;
-        if (p && !dirty && lts === rts && !!p.deletedAt === !!r.deleted_at && (p.remoteImage || !r.image_path)) continue;
+        // (an operator filled in later by another phone's catch-up PATCH keeps the edit time, so compare it too)
+        const sameExtra = p && (!r.operator || r.operator === p.operator);
+        if (p && !dirty && lts === rts && sameExtra && !!p.deletedAt === !!r.deleted_at && (p.remoteImage || !r.image_path)) continue;
         p = applyPhotoRow(p || { blob: null, thumb: null }, r);
         if (p.deletedAt) { p.blob = null; p.thumb = null; } // someone deleted it; a copy stays on the server
         await putPhoto(p);

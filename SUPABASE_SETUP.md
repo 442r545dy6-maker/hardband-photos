@@ -63,6 +63,15 @@ If your project was created with an older `setup.sql`, add the new **stage** col
 
 Phones keep syncing even before you run it; photos marked *Before hardband* get their stage uploaded afterwards.
 
+### Add the Operator column (who did the work) — run this once
+1. **SQL Editor** → new query.
+2. Paste all of `supabase/migrations/003_operator.sql` and click **Run**. It only adds a column; nothing is changed or deleted,
+   and it's safe to run again.
+3. The results show your photos by operator. Older photos show as `null (= No operator)`.
+
+Phones keep syncing even before you run it: the operator stays on each phone and is uploaded automatically once the
+column exists. Until then, other phones don't see who took a photo.
+
 ## 4. Create the team login
 1. In the left sidebar, click **Authentication**, then **Users**.
 2. Click **Add user**, then **Create new user**.

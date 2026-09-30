@@ -81,7 +81,7 @@ async function putPhoto(p) {
 const S = {
   rigs: new Map(), customers: new Map(), pipeSpecs: new Map(), photos: [], meta: {},
   gone: { rigs: new Map(), customers: new Map(), pipeSpecs: new Map() }, // deleted/merged entries (team sync tombstones)
-  search: { q: '', customerId: '', rigId: '', end: '', stage: '', from: '', to: '' }, showFilters: false,
+  search: { q: '', customerId: '', rigId: '', end: '', stage: '', op: '', from: '', to: '' }, showFilters: false,
   queue: [], qIndex: 0, savedCount: 0, batchValues: null, lastSaved: null, keepJoint: false,
   context: null, addContext: null, lastListHash: '#/', lastList: [], manageTab: 'rigs',
   viewUrls: [], scroll: {}, modalCancel: null,
@@ -103,6 +103,132 @@ const STAGES = {
 };
 const stageOf = (p) => (p && p.stage === 'pre' ? 'pre' : 'post');
 const stageBadge = (p, extra = '') => `<span class="stage-badge ${stageOf(p)}${extra ? ' ' + extra : ''}">${STAGES[stageOf(p)].badge}</span>`;
+
+/* ---------- operator: who did the work (part of every record) ----------
+   Stored on the record as ONE text value "Name Number", e.g. "Dusty 104" (Supabase column photos.operator).
+   The number is the identity: same number = same operator, whatever the capitalisation/spacing of the name.
+   Records saved before this existed have no operator ("No operator" / Unassigned).
+   The phone remembers the last operator and the names added here (localStorage); the pick list also includes
+   every operator found on the (shared) records, so names added on one phone reach the others with their photos. */
+const OP_LS = { cur: 'hbp.operator', list: 'hbp.operators' };
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private mode: just not remembered */ } };
+const cleanOp = (s) => String(s || '').trim().replace(/\s+/g, ' ');
+// "Dusty 104" -> { name: 'Dusty', num: '104' }; a value without a trailing number keeps it all as the name.
+function parseOp(s) {
+  const t = cleanOp(s), m = t.match(/^(?:(.*\S)\s+)?#?(\d+)$/);
+  return m ? { name: (m[1] || '').trim(), num: m[2] } : { name: t, num: '' };
+}
+const opNum = (n) => String(n || '').replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+const opKey = (s) => { const t = cleanOp(s); if (!t) return ''; const o = parseOp(t); return o.num ? 'n:' + opNum(o.num) : 'x:' + o.name.toLowerCase(); };
+const opText = (p) => cleanOp(p && p.operator) || 'No operator';
+const currentOperator = () => cleanOp(lsGet(OP_LS.cur, ''));
+function rememberOperator(label, makeCurrent) {
+  const l = cleanOp(label); if (!l) return;
+  const list = (lsGet(OP_LS.list, []) || []).filter((x) => opKey(x) !== opKey(l));
+  lsSet(OP_LS.list, [l, ...list].slice(0, 300));
+  if (makeCurrent) lsSet(OP_LS.cur, l);
+}
+// Every known operator, one per number: this phone's list first, then the newest spelling found on records.
+function operatorRoster() {
+  const m = new Map();
+  const add = (label) => { const l = cleanOp(label), k = opKey(l); if (k && !m.has(k)) m.set(k, l); };
+  add(currentOperator());
+  for (const l of lsGet(OP_LS.list, []) || []) add(l);
+  for (const p of S.photos.slice().sort((a, b) => (b.updatedAt || b.addedAt || 0) - (a.updatedAt || a.addedAt || 0))) add(p.operator);
+  return [...m.entries()].map(([key, label]) => ({ key, label })).sort((a, b) => byText(a.label, b.label));
+}
+const opLinkHTML = (p) => { const k = opKey(p && p.operator);
+  return `<button type="button" class="op-link${k ? '' : ' none'}" data-op-filter="${esc(k || '__none')}" title="Show all photos by this operator">${k ? '👷 ' : ''}${esc(opText(p))}</button>`; };
+
+// Operator dropdown: saved names + "Add new operator…" (Name + Number typed once, then it's in the list).
+function opFieldHTML(id, value, { blank = '— Pick your name —', wrapId = '', label = 'Operator' } = {}) {
+  const roster = operatorRoster(), v = cleanOp(value);
+  let selLabel = '';
+  if (v) { const hit = roster.find((o) => o.key === opKey(v)); if (hit) selLabel = hit.label; else { roster.push({ key: opKey(v), label: v }); selLabel = v; } }
+  return `<div class="field op-field"${wrapId ? ` id="${wrapId}"` : ''}><label for="${id}">${esc(label)}</label>
+    <select id="${id}" class="op-select" data-op-select="1"><option value="">${esc(blank)}</option>${roster.map((o) => `<option value="${esc(o.label)}" ${o.label === selLabel ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}<option value="__new">＋ Add new operator…</option></select>
+    <div class="op-add" id="${id}Add" hidden>
+      <div class="op-add-row">
+        <div class="op-add-name"><label for="${id}Name">Name</label><input id="${id}Name" type="text" placeholder="e.g. Dusty" autocapitalize="words" autocorrect="off" spellcheck="false" autocomplete="off" enterkeyhint="next"></div>
+        <div class="op-add-num"><label for="${id}Num">Number</label><input id="${id}Num" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="10" placeholder="e.g. 104" autocomplete="off" enterkeyhint="done"></div>
+      </div>
+      <div class="muted small">Number = your employee / badge number. It tells two people with the same name apart.</div>
+      <div class="row op-add-actions"><button type="button" class="btn ghost" id="${id}AddCancel">Cancel</button><button type="button" class="btn primary" id="${id}AddOk">Save operator</button></div>
+    </div>
+    <div class="small op-msg" id="${id}Msg" role="alert"></div></div>`;
+}
+function bindOpField(id, { onChange = null } = {}) {
+  const sel = $('#' + id), box = $('#' + id + 'Add'), nm = $('#' + id + 'Name'), nu = $('#' + id + 'Num'), msg = $('#' + id + 'Msg');
+  let prev = sel.value === '__new' ? '' : sel.value;
+  const choose = (label) => {
+    if (label && ![...sel.options].some((o) => o.value === label)) {
+      const o = document.createElement('option'); o.value = label; o.textContent = label;
+      sel.insertBefore(o, sel.querySelector('option[value="__new"]'));
+    }
+    sel.value = label; prev = label; box.hidden = true; msg.textContent = '';
+    if (onChange) onChange(label);
+  };
+  const ctl = {
+    get value() { return sel.value === '__new' ? '' : sel.value; },
+    get adding() { return !box.hidden; },
+    choose,
+    say(t) { msg.textContent = t; },
+    // Save the typed Name + Number. Returns the operator ("Name Number"), or '' with a message if it can't.
+    commit() {
+      let name = cleanOp(nm.value), num = String(nu.value || '').trim();
+      if (!num) { const o = parseOp(name); if (o.num && o.name) { name = o.name; num = o.num; } } // "Dusty 104" typed in Name
+      if (num) name = name.replace(new RegExp('\\s+#?' + num.replace(/\D/g, '') + '$'), '').trim();
+      if (!name) { msg.textContent = 'Type your name.'; nm.focus(); return ''; }
+      if (!num) { msg.textContent = 'Type your number (digits only), e.g. badge number.'; nu.focus(); return ''; }
+      if (!/^\d+$/.test(num)) { msg.textContent = 'Number: digits only.'; nu.focus(); return ''; }
+      const key = 'n:' + opNum(num), same = operatorRoster().find((o) => o.key === key);
+      if (same) {
+        if (parseOp(same.label).name.toLowerCase() === name.toLowerCase()) { rememberOperator(same.label); choose(same.label); return same.label; }
+        msg.innerHTML = `Number ${esc(num)} is already used by <b>${esc(same.label)}</b>. Pick them, or type a different number.
+          <button type="button" class="btn secondary block op-use" id="${id}Use">Use ${esc(same.label)}</button>`;
+        $('#' + id + 'Use').onclick = () => { rememberOperator(same.label); choose(same.label); };
+        nu.focus(); return '';
+      }
+      const label = `${name} ${num}`;
+      rememberOperator(label);
+      choose(label);
+      return label;
+    },
+  };
+  sel.addEventListener('change', () => {
+    msg.textContent = '';
+    if (sel.value !== '__new') { prev = sel.value; box.hidden = true; if (onChange) onChange(sel.value); return; }
+    nm.value = ''; nu.value = ''; box.hidden = false;
+    setTimeout(() => nm.focus(), 30);
+  });
+  $('#' + id + 'AddCancel').onclick = () => { box.hidden = true; msg.textContent = ''; sel.value = prev; };
+  $('#' + id + 'AddOk').onclick = () => ctl.commit();
+  nm.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); nu.focus(); } });
+  nu.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); ctl.commit(); } });
+  nu.addEventListener('input', () => { const d = nu.value.replace(/\D/g, ''); if (d !== nu.value) nu.value = d; msg.textContent = ''; });
+  nm.addEventListener('input', () => { msg.textContent = ''; });
+  return ctl;
+}
+// Tap an operator name anywhere: the library shows everything that operator did.
+function applyOperatorFilter(key) {
+  Object.assign(S.search, { q: '', customerId: '', rigId: '', end: '', stage: '', from: '', to: '', op: key || '' });
+  S.showFilters = true; S.scroll['#/'] = 0;
+  if (location.hash === '#/' || location.hash === '') route(); else location.hash = '#/';
+}
+function operatorSheet() {
+  const m = openModal(`<h3>Who's working?</h3>
+    <p class="muted small">Pick your name once — this phone remembers it and puts it on every new photo.</p>
+    ${opFieldHTML('sheetOp', currentOperator())}
+    <div class="stack form-actions"><button type="button" class="btn primary big block" id="sheetOpDone">Done</button></div>`);
+  const ctl = bindOpField('sheetOp', { onChange: (l) => { if (l) rememberOperator(l, true); } });
+  $('#sheetOpDone', m).onclick = () => {
+    if (ctl.adding && !ctl.commit()) return;
+    if (ctl.value) rememberOperator(ctl.value, true);
+    closeModal(true); if (!location.hash || location.hash === '#/') renderHome();
+  };
+  return m;
+}
 
 const SEED = {
   customer: { id: 'c_eog', name: 'EOG' },
@@ -412,11 +538,11 @@ window.addEventListener('hashchange', (e) => {
 });
 
 /* ================= home: folders + search ================= */
-const hasSearch = () => { const s = S.search; return !!(s.q.trim() || s.customerId || s.rigId || s.end || s.stage || s.from || s.to); };
-const filterCount = () => { const s = S.search; return [s.customerId, s.rigId, s.end, s.stage, s.from, s.to].filter(Boolean).length; };
+const hasSearch = () => { const s = S.search; return !!(s.q.trim() || s.customerId || s.rigId || s.end || s.stage || s.op || s.from || s.to); };
+const filterCount = () => { const s = S.search; return [s.op, s.customerId, s.rigId, s.end, s.stage, s.from, s.to].filter(Boolean).length; };
 function haystack(p) {
   return [labelOf('customers', p.customerId), labelOf('rigs', p.rigId), (S.rigs.get(p.rigId) || {}).notes, labelOf('pipeSpecs', p.pipeSpecId),
-    p.serialNumber, p.end, p.bandNumber ? 'B' + p.bandNumber : '', p.notes, isoDay(p.createdAt), STAGES[stageOf(p)].words].join(' \u0001 ').toLowerCase();
+    p.serialNumber, p.end, p.bandNumber ? 'B' + p.bandNumber : '', p.notes, isoDay(p.createdAt), STAGES[stageOf(p)].words, cleanOp(p.operator)].join(' \u0001 ').toLowerCase();
 }
 function searchPhotos() {
   const s = S.search;
@@ -426,6 +552,7 @@ function searchPhotos() {
     if (s.rigId && p.rigId !== s.rigId) return false;
     if (s.end && p.end !== s.end) return false;
     if (s.stage && stageOf(p) !== s.stage) return false;
+    if (s.op && (s.op === '__none' ? !!opKey(p.operator) : opKey(p.operator) !== s.op)) return false;
     const d = isoDay(p.createdAt);
     if (s.from && d < s.from) return false;
     if (s.to && d > s.to) return false;
@@ -440,6 +567,21 @@ function tileHTML(p, showFolder) {
   const sub = showFolder ? `${labelOf('rigs', p.rigId)} · ${fmtShort(p.createdAt)}` : fmtShort(p.createdAt);
   return `<a class="tile" href="#/photo/${encodeURIComponent(p.id)}" data-id="${esc(p.id)}"><img loading="lazy" src="${thumbUrl(p)}" alt="${esc(cap)}">${stageBadge(p, 'on-tile')}<span class="cap">${esc(cap)}<span class="cap2">${esc(sub)}</span></span></a>`;
 }
+// Operator filter: All, Unassigned, then every operator found on the records (one entry per number).
+function opFilterList() {
+  const roster = new Map(operatorRoster().map((o) => [o.key, o.label])), found = new Map();
+  let none = 0;
+  for (const p of S.photos) { const k = opKey(p.operator); if (!k) { none++; continue; } found.set(k, (found.get(k) || 0) + 1); }
+  const list = [...found.entries()].map(([key, n]) => ({ key, n, label: roster.get(key) || cleanOp(S.photos.find((p) => opKey(p.operator) === key).operator) }));
+  return { list: list.sort((a, b) => byText(a.label, b.label)), none };
+}
+function opFilterOpts(sel) {
+  const { list, none } = opFilterList();
+  if (sel && sel !== '__none' && !list.some((o) => o.key === sel)) list.push({ key: sel, n: 0, label: (operatorRoster().find((o) => o.key === sel) || {}).label || sel.slice(2) });
+  return `<option value="">All operators</option><option value="__none" ${sel === '__none' ? 'selected' : ''}>Unassigned (no operator)${none ? ` (${none})` : ''}</option>` +
+    list.map((o) => `<option value="${esc(o.key)}" ${o.key === sel ? 'selected' : ''}>${esc(o.label)} (${o.n})</option>`).join('');
+}
+const opFilterLabel = (key) => (key === '__none' ? 'No operator' : (opFilterList().list.find((o) => o.key === key) || operatorRoster().find((o) => o.key === key) || { label: key.slice(2) }).label);
 const opts = (kind, sel, blank) => (blank ? `<option value="">${esc(blank)}</option>` : '') +
   sortedItems(kind).map((x) => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x[KINDS[kind].field])}</option>`).join('');
 
@@ -447,12 +589,15 @@ function renderHome() {
   S.lastListHash = '#/'; S.context = null;
   setChrome({ title: 'Hardband Photos', bottom: true, insp: true });
   const s = S.search, fc = filterCount();
+  const curOp = currentOperator();
   view.innerHTML = `
+    <button type="button" id="opChip" class="op-chip${curOp ? '' : ' unset'}" aria-label="Operator on this phone">👷 <span class="op-chip-l">Operator:</span> <b id="opChipName">${esc(curOp || 'Tap to pick your name')}</b> <span class="op-chip-c">▾</span></button>
     <div class="searchbar">
       <input id="q" type="search" placeholder="Search serial, rig, notes…" value="${esc(s.q)}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-label="Search">
       <button id="filterBtn" class="btn ghost" aria-expanded="${S.showFilters}">Filter${fc ? `<span class="chip-count">${fc}</span>` : ''}</button>
     </div>
     <div id="filters" class="filters card" ${S.showFilters ? '' : 'hidden'}>
+      <div class="full"><label for="fO">Operator</label><select id="fO">${opFilterOpts(s.op)}</select></div>
       <div><label for="fC">Customer</label><select id="fC">${opts('customers', s.customerId, 'Any customer')}</select></div>
       <div><label for="fR">Rig</label><select id="fR">${opts('rigs', s.rigId, 'Any rig')}</select></div>
       <div><label for="fE">End</label><select id="fE"><option value="">Box or Pin</option><option ${s.end === 'Box' ? 'selected' : ''}>Box</option><option ${s.end === 'Pin' ? 'selected' : ''}>Pin</option></select></div>
@@ -468,8 +613,9 @@ function renderHome() {
   q.addEventListener('keydown', (e) => { if (e.key === 'Enter') q.blur(); });
   $('#filterBtn').onclick = () => { S.showFilters = !S.showFilters; $('#filters').hidden = !S.showFilters; $('#filterBtn').setAttribute('aria-expanded', S.showFilters); };
   const bind = (id, key) => { $(id).addEventListener('change', (e) => { s[key] = e.target.value; renderHome(); }); };
-  bind('#fC', 'customerId'); bind('#fR', 'rigId'); bind('#fE', 'end'); bind('#fS', 'stage'); bind('#fFrom', 'from'); bind('#fTo', 'to');
-  $('#fClear').onclick = () => { Object.assign(s, { q: '', customerId: '', rigId: '', end: '', stage: '', from: '', to: '' }); renderHome(); };
+  bind('#fO', 'op'); bind('#fC', 'customerId'); bind('#fR', 'rigId'); bind('#fE', 'end'); bind('#fS', 'stage'); bind('#fFrom', 'from'); bind('#fTo', 'to');
+  $('#fClear').onclick = () => { Object.assign(s, { q: '', customerId: '', rigId: '', end: '', stage: '', op: '', from: '', to: '' }); renderHome(); };
+  $('#opChip').onclick = operatorSheet;
   renderBanner();
   renderHomeBody();
 }
@@ -494,8 +640,10 @@ function renderHomeBody() {
   if (hasSearch()) {
     const res = searchPhotos();
     S.lastList = res.map((p) => p.id);
-    body.innerHTML = `<div class="result-count" id="resultCount">${res.length} photo${res.length === 1 ? '' : 's'} found</div>` +
+    const opNote = S.search.op ? ` · <span id="resultOp">${S.search.op === '__none' ? 'no operator' : '👷 ' + esc(opFilterLabel(S.search.op))}</span> <button type="button" class="btn ghost op-clear" id="opClear">✕ All operators</button>` : '';
+    body.innerHTML = `<div class="result-count" id="resultCount">${res.length} photo${res.length === 1 ? '' : 's'} found${opNote}</div>` +
       (res.length ? `<div class="grid" id="results">${res.map((p) => tileHTML(p, true)).join('')}</div>` : `<div class="empty">No matches.</div>`);
+    const oc = $('#opClear'); if (oc) oc.onclick = () => { S.search.op = ''; renderHome(); };
     return;
   }
   if (!S.photos.length) {
@@ -598,6 +746,7 @@ function renderPhoto(id) {
     <div class="card" style="margin-top:12px">
       <dl class="kv" id="detailFields">
         <dt>Stage</dt><dd id="detailStage">${stageBadge(p)} ${esc(STAGES[stageOf(p)].label)}</dd>
+        <dt>Operator</dt><dd id="detailOp">${opLinkHTML(p)}</dd>
         <dt>Customer</dt><dd>${esc(labelOf('customers', p.customerId) || '—')}</dd>
         <dt>Rig</dt><dd>${esc(rig.name || '—')}${rig.notes ? `<div class="muted small">${esc(rig.notes)}</div>` : ''}</dd>
         <dt>Pipe spec</dt><dd>${esc(labelOf('pipeSpecs', p.pipeSpecId) || '—')}</dd>
@@ -663,6 +812,7 @@ function renderCompare(preId, postId) {
         <dt>Serial #</dt><dd>${esc(p.serialNumber || '—')}</dd>
         <dt>Rig</dt><dd>${esc(rig.name || '—')}</dd>
         <dt>Customer</dt><dd>${esc(labelOf('customers', p.customerId) || '—')}</dd>
+        <dt>Operator</dt><dd class="cmp-op">${opLinkHTML(p)}</dd>
         <dt>Taken</dt><dd>${fmtDate(p.createdAt)}</dd>
         <dt>Where</dt><dd>${esc(bandText(p) || '—')}</dd>
         <dt>Condition</dt><dd class="cmp-notes">${esc(p.notes || '—')}</dd>
@@ -713,7 +863,7 @@ async function buildComparisonJpeg(pre, post) {
   const noteLines = [pre, post].map((p) => wrapText(meas, 'Condition: ' + (p.notes || '—'), colW, 8));
   const rigName = (p) => (S.rigs.get(p.rigId) || S.gone.rigs.get(p.rigId) || {}).name || '—';
   const sameWhere = rigName(pre) === rigName(post) && pre.customerId === post.customerId;
-  const headH = 130, textH = 60 + 40 + (sameWhere ? 0 : 38) + Math.max(...noteLines.map((l) => l.length)) * 34 + pad;
+  const headH = 130, textH = 60 + 40 + 38 + (sameWhere ? 0 : 38) + Math.max(...noteLines.map((l) => l.length)) * 34 + pad;
   const H = headH + imgH + textH + 44;
   const c = document.createElement('canvas'); c.width = W; c.height = H;
   const ctx = c.getContext('2d');
@@ -740,6 +890,7 @@ async function buildComparisonJpeg(pre, post) {
     ctx.font = `26px ${font}`; ctx.fillStyle = '#333d47';
     ctx.fillText(`${isoLocal(p.createdAt)}${bandText(p) ? '  ·  ' + bandText(p) : ''}${p.serialNumber ? '  ·  SN ' + p.serialNumber : ''}`, x, ty); ty += 38;
     if (!sameWhere) { ctx.fillText(`Rig ${rigName(p)}  ·  ${labelOf('customers', p.customerId) || 'No customer'}`, x, ty); ty += 38; }
+    ctx.fillText(`Operator: ${opText(p)}`, x, ty); ty += 38;
     ctx.fillStyle = '#111820';
     for (const line of noteLines[k]) { ctx.fillText(line, x, ty); ty += 34; }
   });
@@ -782,17 +933,18 @@ function renderForm(mode, id) {
   if (mode === 'edit') {
     p = S.photos.find((x) => x.id === id);
     if (!p) { location.hash = '#/'; return; }
-    vals = { customerId: p.customerId, rigId: p.rigId, pipeSpecId: p.pipeSpecId, serialNumber: p.serialNumber || '', end: p.end || '', bandNumber: p.bandNumber || '', notes: p.notes || '', createdAt: p.createdAt, stage: stageOf(p) };
+    vals = { customerId: p.customerId, rigId: p.rigId, pipeSpecId: p.pipeSpecId, serialNumber: p.serialNumber || '', end: p.end || '', bandNumber: p.bandNumber || '', notes: p.notes || '', createdAt: p.createdAt, stage: stageOf(p), operator: cleanOp(p.operator) };
     setChrome({ title: 'Edit photo', back: `#/photo/${encodeURIComponent(id)}`, bottom: false });
   } else {
     item = S.queue[S.qIndex];
     if (!item) { location.hash = '#/'; return; }
     const lu = S.meta.lastUsed || {};
-    vals = { customerId: lu.customerId || '', rigId: lu.rigId || '', pipeSpecId: lu.pipeSpecId || '', serialNumber: '', end: '', bandNumber: '', notes: '', stage: S.meta.lastStage === 'pre' ? 'pre' : 'post' };
+    vals = { customerId: lu.customerId || '', rigId: lu.rigId || '', pipeSpecId: lu.pipeSpecId || '', serialNumber: '', end: '', bandNumber: '', notes: '', stage: S.meta.lastStage === 'pre' ? 'pre' : 'post', operator: currentOperator() };
     if (S.addContext) Object.assign(vals, S.addContext);
     if (S.addKeep && S.lastSaved) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '', stage: stageOf(S.lastSaved) });
     if (S.batchValues) Object.assign(vals, { ...S.batchValues, bandNumber: '', notes: '' });
     if (S.addInspect) vals.stage = 'pre'; // inspection session: every new photo starts as Before hardband
+    if (S.addInspect && S.inspection && S.inspection.operator) vals.operator = S.inspection.operator;
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
   }
   for (const [k, kind] of [['customerId', 'customers'], ['rigId', 'rigs'], ['pipeSpecId', 'pipeSpecs']]) if (vals[k] && !S[kind].has(vals[k])) vals[k] = '';
@@ -812,6 +964,7 @@ function renderForm(mode, id) {
       <div id="mainFields">
       <div class="field" id="fldCustomer"><label for="fCustomer">Customer</label>${selectHTML('customers', 'customerId', 'fCustomer')}</div>
       <div class="field" id="fldRig"><label for="fRig">Rig</label>${selectHTML('rigs', 'rigId', 'fRig')}</div>
+      ${opFieldHTML('fOperator', vals.operator, { wrapId: 'fldOperator', blank: 'No operator' })}
       <div class="field" id="fldSpec"><label for="fSpec">Pipe spec</label>${selectHTML('pipeSpecs', 'pipeSpecId', 'fSpec')}</div>
       <div class="field" id="fldSerial"><label for="fSerial">Serial number</label>
         <input id="fSerial" type="text" list="snList" value="${esc(vals.serialNumber)}" placeholder="Stamped serial / joint #" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="done">
@@ -827,7 +980,7 @@ function renderForm(mode, id) {
         <div class="chips" id="fChips" data-stage="${vals.stage}"></div></div>
       ${mode === 'edit' ? `<div class="field" id="fldDate"><label for="fDate">Date / time taken</label><input id="fDate" type="datetime-local" value="${dtLocalValue(vals.createdAt)}"></div>` : ''}
       </div>
-      <details class="more-box" id="moreBox" hidden><summary>More details <span class="muted small">Box/Pin, band, notes, pipe spec, customer${mode === 'edit' ? ', date' : ''}</span></summary><div id="moreFields"></div></details>
+      <details class="more-box" id="moreBox" hidden><summary>More details <span class="muted small">Box/Pin, band, notes, operator, pipe spec, customer${mode === 'edit' ? ', date' : ''}</span></summary><div id="moreFields"></div></details>
       <div class="stack form-actions">
         ${mode === 'edit'
     ? `<button type="submit" class="btn primary big block" id="saveBtn">Save changes</button><a class="btn ghost block" href="#/photo/${encodeURIComponent(id)}">Cancel</a>`
@@ -843,16 +996,17 @@ function renderForm(mode, id) {
   // so switching stage never loses what was typed (notes included); only the quick-pick buttons change.
   const fld = (x) => $('#fld' + x);
   const peekNotes = () => { const pk = $('#notesPeek'), v = $('#fNotes').value.trim(); pk.hidden = stage !== 'pre' || !v || $('#moreBox').open; pk.textContent = v ? 'Notes: ' + v : ''; };
-  const drawHead = () => { $('#preHead').innerHTML = `<span class="pre-head-rig">📁 ${esc(labelOf('rigs', $('#fRig').value) || 'No rig')}</span> · ${stageBadge({ stage: 'pre' })} <b>Before hardband</b>`; };
+  const drawHead = () => { $('#preHead').innerHTML = `<span class="pre-head-rig">📁 ${esc(labelOf('rigs', $('#fRig').value) || 'No rig')}</span> · ${stageBadge({ stage: 'pre' })} <b>Before hardband</b> <span class="pre-head-op" id="preHeadOp">· 👷 ${esc(opText({ operator: opCtl.value }))}</span>`; };
+  const opCtl = bindOpField('fOperator', { onChange: () => { if (stage === 'pre') drawHead(); } });
   const drawStage = () => {
     $$('#fStage button').forEach((b) => { const on = b.dataset.v === stage; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
     const ch = $('#fChips'); ch.dataset.stage = stage;
     ch.innerHTML = CHIPS[stage].map((c) => `<button type="button" data-chip="${esc(c)}">${esc(c)}</button>`).join('');
     $('#fNotes').placeholder = NOTES_HINT[stage];
     const pre = stage === 'pre', main = $('#mainFields'), more = $('#moreFields');
-    const order = pre ? ['Serial', 'PreChips'] : ['Customer', 'Rig', 'Spec', 'Serial', 'End', 'Band', 'Notes', 'Date'];
+    const order = pre ? ['Serial', 'PreChips'] : ['Customer', 'Rig', 'Operator', 'Spec', 'Serial', 'End', 'Band', 'Notes', 'Date'];
     order.map(fld).filter(Boolean).forEach((el) => main.appendChild(el));
-    if (pre) ['End', 'Band', 'Notes', 'Spec', 'Customer', 'Rig', 'Date'].map(fld).filter(Boolean).forEach((el) => more.appendChild(el));
+    if (pre) ['End', 'Band', 'Notes', 'Operator', 'Spec', 'Customer', 'Rig', 'Date'].map(fld).filter(Boolean).forEach((el) => more.appendChild(el));
     (pre ? $('#preChipSlot') : fld('Notes')).appendChild(ch);
     fld('PreChips').hidden = !pre; $('#moreBox').hidden = !pre; $('#preHead').hidden = !pre;
     if (pre) drawHead();
@@ -897,8 +1051,10 @@ function renderForm(mode, id) {
   });
   const collect = () => ({
     customerId: $('#fCustomer').value.replace('__new', ''), rigId: $('#fRig').value.replace('__new', ''), pipeSpecId: $('#fSpec').value.replace('__new', ''),
-    serialNumber: $('#fSerial').value.trim().toUpperCase(), end, bandNumber: band, notes: $('#fNotes').value.trim(), stage,
+    serialNumber: $('#fSerial').value.trim().toUpperCase(), end, bandNumber: band, notes: $('#fNotes').value.trim(), stage, operator: cleanOp(opCtl.value),
   });
+  // A half-typed new operator is saved with the photo (or the save waits for the missing name/number).
+  const opReady = () => !opCtl.adding || !!opCtl.commit();
   // Inspection (Before) photos are found by serial later, so a blank serial gets one confirmation.
   const serialOk = async (v) => {
     if (mode !== 'add' || v.stage !== 'pre' || v.serialNumber) return true;
@@ -908,6 +1064,7 @@ function renderForm(mode, id) {
   };
   $('#photoForm').onsubmit = async (e) => {
     e.preventDefault();
+    if (!opReady()) return;
     const v = collect();
     if (!(await serialOk(v))) return;
     $('#saveBtn').disabled = true;
@@ -928,6 +1085,7 @@ function renderForm(mode, id) {
   };
   const sa = $('#saveAllBtn');
   if (sa) sa.onclick = async () => {
+    if (!opReady()) return;
     const v = collect();
     if (!(await serialOk(v))) return;
     const b = busy('Saving…'); const n = S.queue.length - S.qIndex;
@@ -945,7 +1103,8 @@ async function saveQueued(v) {
   await putPhoto(p);
   S.photos.push(p);
   markDirty('photos', p.id);
-  S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, stage: v.stage };
+  S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, stage: v.stage, operator: v.operator };
+  if (v.operator) { rememberOperator(v.operator, true); if (S.addInspect && S.inspection) { S.inspection.operator = v.operator; drawInspBar(); } } // next photo: same operator
   S.savedCount++;
   if (S.addInspect && S.inspection) S.inspection.count++;
   await setMeta('lastUsed', { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId });
@@ -969,7 +1128,7 @@ function renderSaved() {
   view.innerHTML = `
     <div class="saved-hero"><div class="big-emoji">✅</div>
       <h3 id="savedMsg">Saved ${n} photo${n === 1 ? '' : 's'}</h3>
-      <p class="muted">${esc(labelOf('customers', p.customerId) || '—')} / ${esc(labelOf('rigs', p.rigId) || '—')}${p.serialNumber ? ' · SN ' + esc(p.serialNumber) : ''}</p><p id="savedStage">${stageBadge(p)} ${esc(STAGES[stageOf(p)].label)}</p></div>
+      <p class="muted">${esc(labelOf('customers', p.customerId) || '—')} / ${esc(labelOf('rigs', p.rigId) || '—')}${p.serialNumber ? ' · SN ' + esc(p.serialNumber) : ''}</p><p class="muted small" id="savedOp">👷 ${esc(opText(p))}</p><p id="savedStage">${stageBadge(p)} ${esc(STAGES[stageOf(p)].label)}</p></div>
     <div class="stack">
       ${stageOf(p) === 'pre' ? `<label for="camInput" class="btn primary big block" data-keep="0" id="nextPhotoBtn">📷 Next photo</label>
       ${p.serialNumber ? `<label for="camInput" class="btn secondary block" data-keep="1">📷 Same joint (SN ${esc(p.serialNumber)})</label>` : ''}`
@@ -1012,6 +1171,7 @@ function startInspectionSheet() {
   const rigs = sortedItems('rigs');
   const m = openModal(`<h3>Start inspection</h3>
     <form id="inspForm" autocomplete="off">
+      ${opFieldHTML('inspOp', currentOperator(), { wrapId: 'inspOpField', label: 'Operator (you)' })}
       <div class="field"><label for="inspRigName">Rig name</label>
         <input id="inspRigName" type="text" list="inspRigList" placeholder="Type or pick a rig" autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="go">
         <datalist id="inspRigList">${rigs.map((r) => `<option value="${esc(r.name)}">`).join('')}</datalist>
@@ -1024,11 +1184,15 @@ function startInspectionSheet() {
       </div>
     </form>`);
   const inp = $('#inspRigName', m);
+  const opCtl = bindOpField('inspOp', { onChange: (l) => { if (l) rememberOperator(l, true); } });
   setTimeout(() => inp.focus(), 50);
   const begin = (e) => {
     const name = inp.value.trim().replace(/\s+/g, ' ');
     if (!name) { if (e) e.preventDefault(); $('#inspMsg', m).textContent = 'Type the rig name first.'; inp.focus(); return false; }
-    beginInspection(name, $('#inspCust', m).value);
+    const op = opCtl.adding ? opCtl.commit() : opCtl.value;
+    if (!op) { if (e) e.preventDefault(); if (!opCtl.adding) opCtl.say('Pick your name first (or ＋ Add new operator).'); return false; }
+    rememberOperator(op, true);
+    beginInspection(name, $('#inspCust', m).value, op);
     setTimeout(() => closeModal(true), 0); // after the tap has opened the camera
     return true;
   };
@@ -1037,8 +1201,8 @@ function startInspectionSheet() {
   inp.addEventListener('input', () => { $('#inspMsg', m).textContent = ''; });
   $('#inspForm', m).onsubmit = (e) => { e.preventDefault(); if (begin(null)) $('#camInput').click(); }; // Enter/Go key
 }
-function beginInspection(name, customerId) {
-  const sess = { rigName: name, rigId: null, customerId: customerId || '', count: 0 };
+function beginInspection(name, customerId, operator) {
+  const sess = { rigName: name, rigId: null, customerId: customerId || '', count: 0, operator: cleanOp(operator) };
   S.inspection = sess;
   sess.ready = (async () => {
     const hit = sortedItems('rigs').find((r) => normRig(r.name) === normRig(name)); // same rig, any capitalisation
@@ -1062,6 +1226,7 @@ function drawInspBar(v) {
   bar.hidden = !sess;
   if (!sess) return;
   $('#inspRig').textContent = (sess.rigId && labelOf('rigs', sess.rigId)) || sess.rigName;
+  $('#inspBarOp').textContent = sess.operator ? ` · 👷 ${sess.operator}` : '';
   $('#inspDone').hidden = v === 'add'; // the photo form has its own Save / Discard
 }
 
@@ -1182,13 +1347,13 @@ async function exportZip() {
       try { await Sync.ensureBlob(need[i]); } catch (e) { /* skipped below */ }
     }
     let skippedFiles = 0;
-    const rows = [['file', 'id', 'taken', 'stage', 'customer', 'rig', 'rig_notes', 'pipe_spec', 'serial_number', 'end', 'band', 'condition_notes', 'added']];
+    const rows = [['file', 'id', 'taken', 'stage', 'operator', 'customer', 'rig', 'rig_notes', 'pipe_spec', 'serial_number', 'end', 'band', 'condition_notes', 'added']];
     const jsonPhotos = [];
     photos.forEach((p, i) => {
       const rig = S.rigs.get(p.rigId) || {};
       const path = `${safeName(labelOf('customers', p.customerId) || 'No customer')}/${safeName(rig.name || 'No rig')}/${exportFileName(p)}`;
       if (p.blob) zip.file(path, p.blob, { binary: true, date: new Date(p.createdAt) }); else skippedFiles++;
-      rows.push([path, p.id, isoLocal(p.createdAt), STAGES[stageOf(p)].label, labelOf('customers', p.customerId), rig.name || '', rig.notes || '', labelOf('pipeSpecs', p.pipeSpecId),
+      rows.push([path, p.id, isoLocal(p.createdAt), STAGES[stageOf(p)].label, cleanOp(p.operator), labelOf('customers', p.customerId), rig.name || '', rig.notes || '', labelOf('pipeSpecs', p.pipeSpecId),
         p.serialNumber || '', p.end || '', p.bandNumber || '', p.notes || '', p.addedAt ? isoLocal(p.addedAt) : '']);
       const { blob, thumb, ...meta } = p;
       jsonPhotos.push({ ...meta, stage: stageOf(p), file: path, customer: labelOf('customers', p.customerId), rig: rig.name || '', pipeSpec: labelOf('pipeSpecs', p.pipeSpecId) });
@@ -1269,6 +1434,7 @@ async function init() {
   $('#manageBtn').onclick = () => { location.hash = '#/manage/' + S.manageTab; };
   $('#camBtn').addEventListener('click', () => { S.keepJoint = false; });
   $('#inspBtn').onclick = startInspectionSheet;
+  document.addEventListener('click', (e) => { const b = e.target.closest('[data-op-filter]'); if (!b) return; e.preventDefault(); applyOperatorFilter(b.dataset.opFilter === '__none' ? '__none' : b.dataset.opFilter); });
   $('#inspDone').onclick = () => finishInspection();
   $('#libBtn').addEventListener('click', () => { S.keepJoint = false; });
   for (const id of ['#camInput', '#libInput']) {

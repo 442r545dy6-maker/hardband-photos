@@ -97,6 +97,11 @@ begin
   end if;
 end $$;
 
+-- ---------- migration 003: operator (who did the work) ----------
+-- 'Name Number', e.g. 'Dusty 104'; null = no operator. Same as supabase/migrations/003_operator.sql.
+alter table public.photos add column if not exists operator text;
+create index if not exists photos_operator_idx on public.photos (operator);
+
 -- ---------- indexes (phones pull "changed since" by updated_at) ----------
 create index if not exists customers_updated_at_idx  on public.customers  (updated_at, id);
 create index if not exists rigs_updated_at_idx       on public.rigs       (updated_at, id);

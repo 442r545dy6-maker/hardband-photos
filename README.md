@@ -9,6 +9,7 @@ optionally, in a **shared team library** (Supabase), so the whole crew sees the 
 - `sync.js`: optional sync engine (plain `fetch` against Supabase Auth / REST / Storage, no SDK, nothing loaded from a CDN)
 - `supabase/setup.sql`: run once in the Supabase SQL Editor (tables, indexes, RLS, private `hardband` bucket, seed rows)
 - `supabase/migrations/002_stage.sql`: adds `photos.stage` to a project that was set up before the Before/After stage existed
+- `supabase/migrations/003_operator.sql`: adds `photos.operator` (who did the work)
 - `SUPABASE_SETUP.md`: click-by-click setup for a non-developer
 - `manifest.webmanifest`, `sw.js`: installable + offline app shell (bump `VERSION` in sw.js when files change)
 - `vendor/jszip.min.js`: JSZip 3.10.1 (bundled locally for offline ZIP export/import)
@@ -42,6 +43,26 @@ Photos saved before this existed have no stage and count as `post`.
   uploads rows without `stage` (it detects PostgREST's `PGRST204` "Could not find the 'stage' column") and re-uploads
   those photos once the column exists, so sync never stops. Older app versions don't send `stage`; an upsert only
   sets the columns it sends, so they can't erase it.
+
+## Operator (who did the work)
+Every record carries an operator, stored as one value **"Name Number"** (e.g. `Dusty 104`). The number is the
+identity: the same number is the same operator (so two Dustys are told apart); names ignore case and extra spaces.
+It's part of the common photo record, so future record types (e.g. welding) inherit it.
+- **Pick, don't type**: a dropdown of saved operators on the *Start inspection* sheet (required there), the
+  *👷 Operator* chip at the top of the home screen, and every photo form. *＋ Add new operator…* asks for Name and
+  Number (numeric keypad) once; after that it's in the list. A number already used by a different name gets a warning
+  with a *Use <existing>* button.
+- The phone remembers the last operator (localStorage `hbp.operator`) and pre-selects it on every new photo; each photo
+  can still be changed. The list = names added on this phone (`hbp.operators`) + every operator found on the records,
+  so with the team library the names reach other phones with their photos.
+- Shown on the photo detail, the saved screen, the Inspecting bar, the Before/After comparison and the saved comparison
+  JPEG. Records without one show **No operator**.
+- Library **Filter → Operator**: All operators, Unassigned (no operator), and every operator found (with counts);
+  works with search and the other filters. Tapping an operator name on a photo or comparison shows all their photos.
+- Export: `operator` column in metadata.csv / metadata.json.
+- Team sync: `operator` column on `photos` (`supabase/migrations/003_operator.sql`). Until it's run, rows upload
+  without it (same PGRST204 detection as `stage`) and each phone keeps its operators, then fills them in on the server
+  (operator-only PATCH where still empty) once the column exists.
 
 ## Shared team library (optional)
 1. Follow `SUPABASE_SETUP.md` (free Supabase project → run `supabase/setup.sql` → create the team user → turn off sign-ups).
