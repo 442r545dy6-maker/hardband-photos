@@ -23,6 +23,12 @@ Photos saved before this existed have no stage and count as `post`.
   porosity, Cracks, Needs repair, Eccentric band. Before hardband is a short inspection screen: rig + "Before hardband"
   header, serial number (focused), chips No hardband needed / Reapply / Repair, and everything else under
   *More details*. Switching stage never clears typed notes (chips only add text to the notes).
+- **🔍 Start inspection** (home screen): a sheet whose only required field is the rig name (type it or pick a
+  suggestion; a case-insensitive match reuses the rig, otherwise it is created; customer optional, defaults to the
+  last-used one). **📷 Open camera** is a `<label for="camInput">` (`capture="environment"`), so the camera opens in
+  the same tap. Each photo lands in the Before form for that rig; a blank serial asks "Save without a serial number?"
+  (Add serial / Save anyway); **📷 Next photo** reopens the camera. An "Inspecting: [rig]" strip with **Done** shows
+  until Done is tapped or the user goes back to the home screen.
 - Tiles, the photo detail and the saved screen show a BEFORE / AFTER badge. Search matches "before", "pre",
   "inspection" / "after", "post", and the Filter sheet has a Stage filter.
 - Export: `stage` column in metadata.csv, `stage` in metadata.json, and `_Before_` / `_After_` in JPEG file names.

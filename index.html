@@ -24,10 +24,15 @@
     <button id="backupBtn" class="icon-btn" aria-label="Backup / Export" title="Backup">⤓</button>
     <button id="manageBtn" class="icon-btn" aria-label="Manage rigs, customers, specs" title="Manage">⚙</button>
   </header>
+  <div id="inspBar" class="insp-bar" role="status" hidden>
+    <span class="insp-text">🔍 Inspecting: <b id="inspRig"></b></span>
+    <button id="inspDone" class="btn ghost insp-done" type="button">Done</button>
+  </div>
 
   <main id="view" aria-live="polite"></main>
 
   <nav id="bottombar">
+    <button id="inspBtn" class="btn secondary big insp-btn" type="button" hidden>🔍 Start inspection</button>
     <label for="camInput" id="camBtn" class="btn primary big">📷 Take Photo</label>
     <label for="libInput" id="libBtn" class="btn secondary big" aria-label="Pick from photo library">🖼 Library</label>
   </nav>

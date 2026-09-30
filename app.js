@@ -85,6 +85,7 @@ const S = {
   queue: [], qIndex: 0, savedCount: 0, batchValues: null, lastSaved: null, keepJoint: false,
   context: null, addContext: null, lastListHash: '#/', lastList: [], manageTab: 'rigs',
   viewUrls: [], scroll: {}, modalCancel: null,
+  inspection: null, addInspect: false, // inspection session: { rigName, rigId, customerId, count, ready }
 };
 const KINDS = {
   rigs: { store: 'rigs', field: 'name', label: 'Rig', plural: 'Rigs', ref: 'rigId', notes: true, prefix: 'r' },
@@ -213,7 +214,9 @@ async function processFile(file) {
 
 /* ================= UI plumbing ================= */
 const view = $('#view');
-function setChrome({ title, back = null, bottom = true }) {
+function setChrome({ title, back = null, bottom = true, insp = false }) {
+  $('#inspBtn').hidden = !insp;
+  document.body.classList.toggle('with-insp-btn', !!(bottom && insp));
   $('#title').textContent = title;
   const bb = $('#backBtn');
   bb.hidden = !back;
@@ -240,10 +243,10 @@ function closeModal(silent) {
   $('#modalRoot').innerHTML = '';
   if (cb && !silent) cb();
 }
-function confirmBox({ title, msg = '', ok = 'OK', danger = false }) {
+function confirmBox({ title, msg = '', ok = 'OK', cancel = 'Cancel', danger = false }) {
   return new Promise((resolve) => {
     const m = openModal(`<h3>${esc(title)}</h3>${msg ? `<p>${msg}</p>` : ''}
-      <div class="row form-actions"><button class="btn ghost" data-a="no">Cancel</button>
+      <div class="row form-actions"><button class="btn ghost" data-a="no" id="confirmNo">${esc(cancel)}</button>
       <button class="btn ${danger ? 'danger solid' : 'primary'}" data-a="yes" id="confirmYes">${esc(ok)}</button></div>`, { onCancel: () => resolve(false) });
     m.addEventListener('click', (e) => { const a = e.target.closest('[data-a]'); if (!a) return; closeModal(true); resolve(a.dataset.a === 'yes'); });
   });
@@ -387,6 +390,8 @@ function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').map((x) => decodeURIComponent(x));
   const v = parts[0] || '';
   if (v !== 'saved') S.keepJoint = false;
+  if (v === '' && S.inspection) endInspection(); // leaving back to home finishes the inspection
+  drawInspBar(v);
   try {
     if (v === '') renderHome();
     else if (v === 'folder') renderFolder(parts[1], parts[2]);
@@ -439,7 +444,7 @@ const opts = (kind, sel, blank) => (blank ? `<option value="">${esc(blank)}</opt
 
 function renderHome() {
   S.lastListHash = '#/'; S.context = null;
-  setChrome({ title: 'Hardband Photos', bottom: true });
+  setChrome({ title: 'Hardband Photos', bottom: true, insp: true });
   const s = S.search, fc = filterCount();
   view.innerHTML = `
     <div class="searchbar">
@@ -644,6 +649,7 @@ function renderForm(mode, id) {
     if (S.addContext) Object.assign(vals, S.addContext);
     if (S.addKeep && S.lastSaved) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '', stage: stageOf(S.lastSaved) });
     if (S.batchValues) Object.assign(vals, { ...S.batchValues, bandNumber: '', notes: '' });
+    if (S.addInspect) vals.stage = 'pre'; // inspection session: every new photo starts as Before hardband
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
   }
   for (const [k, kind] of [['customerId', 'customers'], ['rigId', 'rigs'], ['pipeSpecId', 'pipeSpecs']]) if (vals[k] && !S[kind].has(vals[k])) vals[k] = '';
@@ -750,9 +756,17 @@ function renderForm(mode, id) {
     customerId: $('#fCustomer').value.replace('__new', ''), rigId: $('#fRig').value.replace('__new', ''), pipeSpecId: $('#fSpec').value.replace('__new', ''),
     serialNumber: $('#fSerial').value.trim().toUpperCase(), end, bandNumber: band, notes: $('#fNotes').value.trim(), stage,
   });
+  // Inspection (Before) photos are found by serial later, so a blank serial gets one confirmation.
+  const serialOk = async (v) => {
+    if (mode !== 'add' || v.stage !== 'pre' || v.serialNumber) return true;
+    const go = await confirmBox({ title: 'Save without a serial number?', ok: 'Save anyway', cancel: 'Add serial' });
+    if (!go) setTimeout(() => { const f = $('#fSerial'); if (f) f.focus(); }, 30);
+    return go;
+  };
   $('#photoForm').onsubmit = async (e) => {
     e.preventDefault();
     const v = collect();
+    if (!(await serialOk(v))) return;
     $('#saveBtn').disabled = true;
     try {
       if (mode === 'edit') {
@@ -771,7 +785,9 @@ function renderForm(mode, id) {
   };
   const sa = $('#saveAllBtn');
   if (sa) sa.onclick = async () => {
-    const v = collect(); const b = busy('Saving…'); const n = S.queue.length - S.qIndex;
+    const v = collect();
+    if (!(await serialOk(v))) return;
+    const b = busy('Saving…'); const n = S.queue.length - S.qIndex;
     try { for (let k = 0; k < n; k++) { b.update(`Saving ${k + 1} of ${n}…`, (k + 1) / n); await saveQueued(v); S.qIndex++; } }
     catch (err) { b.done(); toast('Save failed: ' + err.message, 5000); return; }
     b.done(); finishQueue();
@@ -788,6 +804,7 @@ async function saveQueued(v) {
   markDirty('photos', p.id);
   S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, stage: v.stage };
   S.savedCount++;
+  if (S.addInspect && S.inspection) S.inspection.count++;
   await setMeta('lastUsed', { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId });
   if (S.meta.lastStage !== v.stage) await setMeta('lastStage', v.stage); // next photo defaults to the same stage
 }
@@ -824,7 +841,10 @@ function renderSaved() {
 async function handleFiles(fileList) {
   const files = Array.from(fileList || []).filter((f) => !f.type || f.type.startsWith('image/') || /\.(jpe?g|png|heic|heif|webp)$/i.test(f.name));
   if (!files.length) return;
-  const addCtx = S.context ? { ...S.context } : null;
+  const insp = S.inspection;
+  if (insp && insp.ready) { await insp.ready.catch(() => null); await new Promise((r) => setTimeout(r, 0)); } // let its folder view settle first
+  const inSession = !!(S.inspection && S.inspection.rigId);
+  const addCtx = inSession ? { rigId: S.inspection.rigId, customerId: S.inspection.customerId } : S.context ? { ...S.context } : null;
   const keep = S.keepJoint; S.keepJoint = false;
   const b = busy(files.length > 1 ? `Preparing 1 of ${files.length}…` : 'Preparing photo…');
   const q = []; let failed = 0;
@@ -835,8 +855,71 @@ async function handleFiles(fileList) {
   b.done();
   if (failed) toast(`${failed} file${failed === 1 ? '' : 's'} could not be read${q.length ? ' and were skipped' : ''}.`, 4000);
   if (!q.length) return;
-  S.queue = q; S.qIndex = 0; S.savedCount = 0; S.batchValues = null; S.addContext = addCtx; S.addKeep = keep;
+  S.queue = q; S.qIndex = 0; S.savedCount = 0; S.batchValues = null; S.addContext = addCtx; S.addKeep = keep; S.addInspect = inSession;
   if (location.hash === '#/add') route(); else location.hash = '#/add';
+}
+
+/* ================= inspection session (Start inspection) ================= */
+// One required field (rig). "Open camera" is a <label for="camInput">, so the camera opens inside the same tap
+// (iOS only opens a file/camera picker from a direct user tap). The rig is looked up / created in the background;
+// handleFiles waits for it before building the form.
+const normRig = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+function startInspectionSheet() {
+  const lu = S.meta.lastUsed || {};
+  const rigs = sortedItems('rigs');
+  const m = openModal(`<h3>Start inspection</h3>
+    <form id="inspForm" autocomplete="off">
+      <div class="field"><label for="inspRigName">Rig name</label>
+        <input id="inspRigName" type="text" list="inspRigList" placeholder="Type or pick a rig" autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="go">
+        <datalist id="inspRigList">${rigs.map((r) => `<option value="${esc(r.name)}">`).join('')}</datalist>
+        <div class="small insp-msg" id="inspMsg" role="alert"></div></div>
+      <div class="field"><label for="inspCust">Customer <span class="muted small">(optional)</span></label>
+        <select id="inspCust"><option value="">No customer</option>${opts('customers', S.customers.has(lu.customerId) ? lu.customerId : '')}</select></div>
+      <div class="stack form-actions">
+        <label for="camInput" class="btn primary big block" id="inspCamBtn">📷 Open camera</label>
+        <button type="button" class="btn ghost block" id="inspCancel">Cancel</button>
+      </div>
+    </form>`);
+  const inp = $('#inspRigName', m);
+  setTimeout(() => inp.focus(), 50);
+  const begin = (e) => {
+    const name = inp.value.trim().replace(/\s+/g, ' ');
+    if (!name) { if (e) e.preventDefault(); $('#inspMsg', m).textContent = 'Type the rig name first.'; inp.focus(); return false; }
+    beginInspection(name, $('#inspCust', m).value);
+    setTimeout(() => closeModal(true), 0); // after the tap has opened the camera
+    return true;
+  };
+  $('#inspCamBtn', m).addEventListener('click', begin);
+  $('#inspCancel', m).onclick = () => closeModal(true);
+  inp.addEventListener('input', () => { $('#inspMsg', m).textContent = ''; });
+  $('#inspForm', m).onsubmit = (e) => { e.preventDefault(); if (begin(null)) $('#camInput').click(); }; // Enter/Go key
+}
+function beginInspection(name, customerId) {
+  const sess = { rigName: name, rigId: null, customerId: customerId || '', count: 0 };
+  S.inspection = sess;
+  sess.ready = (async () => {
+    const hit = sortedItems('rigs').find((r) => normRig(r.name) === normRig(name)); // same rig, any capitalisation
+    const rig = hit || await createLookup('rigs', { name });
+    sess.rigId = rig.id; sess.rigName = rig.name;
+    if (S.inspection === sess) { location.hash = `#/folder/${encodeURIComponent(sess.customerId)}/${encodeURIComponent(rig.id)}`; drawInspBar(); }
+    return rig;
+  })();
+  drawInspBar();
+}
+function endInspection() { S.inspection = null; S.addInspect = false; drawInspBar(); }
+function finishInspection() {
+  const sess = S.inspection; if (!sess) return;
+  endInspection();
+  toast(`Inspection finished${sess.count ? ` — ${sess.count} photo${sess.count === 1 ? '' : 's'}` : ''}`);
+  if (sess.rigId) location.hash = `#/folder/${encodeURIComponent(sess.customerId)}/${encodeURIComponent(sess.rigId)}`; else route();
+}
+function drawInspBar(v) {
+  const bar = $('#inspBar'), sess = S.inspection;
+  if (v === undefined) v = location.hash.replace(/^#\/?/, '').split('/')[0];
+  bar.hidden = !sess;
+  if (!sess) return;
+  $('#inspRig').textContent = (sess.rigId && labelOf('rigs', sess.rigId)) || sess.rigName;
+  $('#inspDone').hidden = v === 'add'; // the photo form has its own Save / Discard
 }
 
 /* ================= manage ================= */
@@ -1042,6 +1125,8 @@ async function init() {
   $('#syncBadge').onclick = () => { location.hash = '#/backup'; };
   $('#manageBtn').onclick = () => { location.hash = '#/manage/' + S.manageTab; };
   $('#camBtn').addEventListener('click', () => { S.keepJoint = false; });
+  $('#inspBtn').onclick = startInspectionSheet;
+  $('#inspDone').onclick = () => finishInspection();
   $('#libBtn').addEventListener('click', () => { S.keepJoint = false; });
   for (const id of ['#camInput', '#libInput']) {
     const inp = $(id);

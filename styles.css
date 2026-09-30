@@ -65,6 +65,14 @@ body {
   backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
 }
 #bottombar #camBtn { flex: 2.2; }
+#bottombar { flex-wrap: wrap; }
+#bottombar .insp-btn { flex: 1 0 100%; order: -1; }
+body.with-insp-btn { padding-bottom: calc(170px + var(--safe-b)); }
+/* active inspection session strip (under the top bar) */
+.insp-bar { display: flex; align-items: center; gap: 10px; padding: 6px 12px; background: #dfe7ee; border-bottom: 1px solid var(--line); font-size: 16px; color: var(--steel); }
+.insp-bar .insp-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.insp-bar .insp-done { min-height: 44px; padding: 0 16px; flex: none; }
+.insp-msg { color: var(--danger); min-height: 1.2em; margin-top: 4px; }
 #bottombar #libBtn { flex: 1; white-space: nowrap; padding: 0 10px; }
 #fSerial { text-transform: uppercase; font-weight: 700; letter-spacing: .5px; }
 #fSerial::placeholder { text-transform: none; font-weight: 400; letter-spacing: 0; }
