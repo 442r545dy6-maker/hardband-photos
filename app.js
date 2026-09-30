@@ -876,7 +876,7 @@ function renderForm(mode, id) {
     $('#bandHint').textContent = end === 'Pin' ? 'Pin has 2 bands.' : end === 'Box' ? 'Box has 3 bands.' : 'Box has 3 bands, Pin has 2. Pick an end first.';
   };
   drawSeg();
-  $('#fEnd').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; const was = end; end = b.dataset.v; if (end === 'Pin' && was !== 'Pin') band = 'All'; drawSeg(); };
+  $('#fEnd').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; const was = end; end = b.dataset.v; if ((end === 'Pin' || end === 'Box') && was !== end) band = 'All'; drawSeg(); };
   $('#fBand').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; band = band === b.dataset.v ? '' : b.dataset.v; drawSeg(); };
   $('.chips').onclick = (e) => {
     const c = e.target.closest('[data-chip]'); if (!c) return;
