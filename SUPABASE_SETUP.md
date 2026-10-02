@@ -83,6 +83,16 @@ with the same security as photos: only the signed-in crew can see or add rejects
 Phones keep working before you run it: operators and rejects stay on each phone and upload by themselves within a few
 minutes after it's run. Until then, other phones don't see who took a photo, and each phone only counts its own rejects.
 
+### ▶ Then: Work order # on rejects — run it once (after the file above)
+1. **SQL Editor** → new, empty query.
+2. Open this link, select everything, copy, and paste it into the editor:
+   https://raw.githubusercontent.com/442r545dy6-maker/hardband-photos/main/supabase/migrations/005_reject_work_order.sql
+3. Click **Run**. It only adds one column (`work_order` on the rejects table); nothing is changed or deleted, and it's
+   safe to run again. "Success. No rows returned" means it worked.
+
+Phones keep working before you run it: a work order typed under *Add details* stays on that phone and is uploaded by
+itself within a few minutes after it's run. Until then, other phones see the reject without its work order.
+
 ## 4. Create the team login
 1. In the left sidebar, click **Authentication**, then **Users**.
 2. Click **Add user**, then **Create new user**.

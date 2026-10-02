@@ -125,6 +125,10 @@ create index if not exists rejects_updated_at_idx  on public.rejects (updated_at
 create index if not exists rejects_operator_idx    on public.rejects (operator);
 create index if not exists rejects_rejected_at_idx on public.rejects (rejected_at);
 
+-- ---------- migration 005: work order # on rejects ----------
+-- Optional "Work order #" from the Log rejected wire sheet; null = none. Same as supabase/migrations/005_reject_work_order.sql.
+alter table public.rejects add column if not exists work_order text;
+
 -- ---------- indexes (phones pull "changed since" by updated_at) ----------
 create index if not exists customers_updated_at_idx  on public.customers  (updated_at, id);
 create index if not exists rigs_updated_at_idx       on public.rigs       (updated_at, id);

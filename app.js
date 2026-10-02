@@ -1256,8 +1256,9 @@ function drawInspBar(v) {
 }
 
 /* ================= rejects: rejected-wire log ================= */
-// One record per rejected wire: { id, operator ('Name Number'), rejectedAt (ms), rigId, rigName, serialNumber, note,
-// loggedBy (team sign-in name on the phone), updatedAt, deletedAt? }. Only the operator is required.
+// One record per rejected wire: { id, operator ('Name Number'), rejectedAt (ms), rigId, rigName, serialNumber, workOrder,
+// note, loggedBy (team sign-in name on the phone), updatedAt, deletedAt? }. Only the operator is required.
+// workOrder = optional "Work order #" (Supabase column rejects.work_order, migration 005_reject_work_order.sql).
 // Counted per operator by number (opKey), like the photos. Shared through the team-library table public.rejects
 // (supabase/migrations/004_rejects.sql); until that table exists they stay on the phone and upload later.
 // Delete = soft (deletedAt) in team mode, so the delete reaches the other phones; nothing is hard-deleted.
@@ -1279,10 +1280,11 @@ function rejectSummaryHTML(curOp) {
   const mine = k ? S.rejects.filter((r) => opKey(r.operator) === k && isoDay(r.rejectedAt) === today).length : 0;
   return `<a class="rej-sum" id="rejSummary" href="#/rejects"><span>${k ? `Your rejects today: <b id="rejMine">${mine}</b>` : `Rejects logged: <b id="rejMine">${S.rejects.length}</b>`}</span><span class="rej-sum-r">By operator ›</span></a>`;
 }
-async function logReject({ operator, rigId = '', serialNumber = '', note = '' }) {
+async function logReject({ operator, rigId = '', serialNumber = '', workOrder = '', note = '' }) {
   const now = Date.now();
   const r = { id: 'rj_' + uid(), operator: cleanOp(operator), rejectedAt: now, rigId: rigId || '', rigName: labelOf('rigs', rigId) || '',
-    serialNumber: String(serialNumber || '').trim().toUpperCase(), note: String(note || '').trim(), loggedBy: S.meta.syncName || '', updatedAt: now };
+    serialNumber: String(serialNumber || '').trim().toUpperCase(), workOrder: String(workOrder || '').trim(), note: String(note || '').trim(),
+    loggedBy: S.meta.syncName || '', updatedAt: now };
   await db.put('rejects', r);
   S.rejects.push(r);
   markDirty('rejects', r.id);
@@ -1305,7 +1307,7 @@ async function undoReject(r) {
   toast('Reject removed');
 }
 // One tap on "Log rejected wire" + one tap on "Log reject". The operator is pre-picked from the phone; with none set,
-// the same pick-your-name dropdown (or Add new operator) must be used first. Rig / serial / note are optional.
+// the same pick-your-name dropdown (or Add new operator) must be used first. Rig / serial / work order / note are optional.
 function logRejectSheet() {
   const lu = S.meta.lastUsed || {};
   const rigId = (S.inspection && S.inspection.rigId) || (S.rigs.has(lu.rigId) ? lu.rigId : '');
@@ -1315,6 +1317,7 @@ function logRejectSheet() {
     <details class="more-box" id="rejMore"><summary>Add details <span class="muted small" id="rejMoreSum"></span></summary>
       <div class="field"><label for="rejRig">Rig</label><select id="rejRig"><option value="">No rig</option>${opts('rigs', rigId)}</select></div>
       <div class="field"><label for="rejSerial">Serial number</label><input id="rejSerial" type="text" placeholder="Stamped serial / joint #" autocapitalize="characters" autocorrect="off" spellcheck="false" autocomplete="off"></div>
+      <div class="field"><label for="rejWo">Work order #</label><input id="rejWo" type="text" maxlength="60" placeholder="e.g. WO-12345" autocorrect="off" spellcheck="false" autocomplete="off"></div>
       <div class="field"><label for="rejNote">Note</label><input id="rejNote" type="text" maxlength="200" placeholder="e.g. porosity, cracks, bad wire" autocomplete="off"></div>
     </details>
     <div class="stack form-actions">
@@ -1322,7 +1325,7 @@ function logRejectSheet() {
       <button type="button" class="btn ghost block" id="rejCancel">Cancel</button>
     </div>`);
   const ctl = bindOpField('rejOp');
-  const sum = () => { const rn = labelOf('rigs', $('#rejRig', m).value); $('#rejMoreSum', m).textContent = `rig, serial, note — optional${rn ? ` · Rig: ${rn}` : ''}`; };
+  const sum = () => { const rn = labelOf('rigs', $('#rejRig', m).value); $('#rejMoreSum', m).textContent = `rig, serial, work order, note — optional${rn ? ` · Rig: ${rn}` : ''}`; };
   sum();
   $('#rejRig', m).addEventListener('change', sum);
   $('#rejCancel', m).onclick = () => closeModal(true);
@@ -1332,7 +1335,7 @@ function logRejectSheet() {
     $('#rejOk', m).disabled = true;
     rememberOperator(op, true);
     let r;
-    try { r = await logReject({ operator: op, rigId: $('#rejRig', m).value, serialNumber: $('#rejSerial', m).value, note: $('#rejNote', m).value }); }
+    try { r = await logReject({ operator: op, rigId: $('#rejRig', m).value, serialNumber: $('#rejSerial', m).value, workOrder: $('#rejWo', m).value, note: $('#rejNote', m).value }); }
     catch (e) { console.error(e); $('#rejOk', m).disabled = false; toast('Could not save: ' + e.message, 5000); return; }
     closeModal(true);
     redrawAfterReject();
@@ -1376,7 +1379,7 @@ function renderRejects(key) {
       <button type="button" class="op-link" id="rejPhotos" data-op-filter="${esc(key)}">📷 Show photos</button>
     </div>
     <div id="rejItems">${list.map((r) => {
-      const d = [rejectRig(r) ? '📁 ' + esc(rejectRig(r)) : '', r.serialNumber ? 'SN ' + esc(r.serialNumber) : '', esc(r.note || '')].filter(Boolean).join(' · ');
+      const d = [rejectRig(r) ? '📁 ' + esc(rejectRig(r)) : '', r.serialNumber ? 'SN ' + esc(r.serialNumber) : '', r.workOrder ? 'WO ' + esc(r.workOrder) : '', esc(r.note || '')].filter(Boolean).join(' · ');
       return `<div class="list-item rej-item" data-id="${esc(r.id)}"><div class="meta"><b class="rej-when">${esc(fmtDate(r.rejectedAt))}</b>${d ? `<small>${d}</small>` : ''}</div>
         <button type="button" class="btn ghost rej-del" data-del="${esc(r.id)}" aria-label="Delete this reject">🗑 Delete</button></div>`; }).join('')
       || '<div class="empty">No rejects.</div>'}</div>`;
@@ -1392,9 +1395,9 @@ function renderRejects(key) {
   };
 }
 function rejectsCsv() {
-  const rows = [['rejected', 'operator', 'operator_number', 'rig', 'serial_number', 'note', 'logged_by', 'id']];
+  const rows = [['rejected', 'operator', 'operator_number', 'rig', 'serial_number', 'work_order', 'note', 'logged_by', 'id']];
   for (const r of S.rejects.slice().sort((a, b) => a.rejectedAt - b.rejectedAt)) {
-    rows.push([isoLocal(r.rejectedAt), cleanOp(r.operator), parseOp(r.operator).num, rejectRig(r), r.serialNumber || '', r.note || '', r.loggedBy || '', r.id]);
+    rows.push([isoLocal(r.rejectedAt), cleanOp(r.operator), parseOp(r.operator).num, rejectRig(r), r.serialNumber || '', r.workOrder || '', r.note || '', r.loggedBy || '', r.id]);
   }
   return '\ufeff' + rows.map((x) => x.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }

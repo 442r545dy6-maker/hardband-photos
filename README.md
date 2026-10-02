@@ -12,6 +12,7 @@ optionally, in a **shared team library** (Supabase), so the whole crew sees the 
 - `supabase/migrations/003_operator.sql`: adds `photos.operator` (who did the work)
 - `supabase/migrations/004_rejects.sql`: adds the `rejects` table (reject log) **and** repeats 003, so it is the one file
   to run on a project that has neither yet
+- `supabase/migrations/005_reject_work_order.sql`: adds `rejects.work_order` (Work order # on a reject; run after 004)
 - `SUPABASE_SETUP.md`: click-by-click setup for a non-developer
 - `manifest.webmanifest`, `sw.js`: installable + offline app shell (bump `VERSION` in sw.js when files change)
 - `vendor/jszip.min.js`: JSZip 3.10.1 (bundled locally for offline ZIP export/import)
@@ -71,21 +72,25 @@ Each rejected wire can be logged in two taps, and the app counts rejects per ope
 - Home screen: **⛔ Log rejected wire** right under the *👷 Operator* chip → a sheet with the operator (pre-picked from
   the phone; with none set, the same pick-your-name dropdown / *＋ Add new operator…* is required first), the time it
   will be saved with, and **⛔ Log reject**. *Add details* (collapsed, optional) = rig (defaults to the last-used rig),
-  serial, short note. Nothing else is required. A toast *Reject logged — Dusty 104* with **Undo** follows; a line under
+  serial, **Work order #**, short note. Nothing else is required. A toast *Reject logged — Dusty 104* with **Undo** follows; a line under
   the button shows *Your rejects today* and links to the per-operator list.
 - **Rejects by operator** (`#/rejects`, also a link under Filter → Operator): one row per operator (same number = same
   operator, case/spaces ignored) with the count and last reject, most rejects first, plus *Unassigned* if any. Tap a
-  name: every reject with its date and time (phone's local time), rig / serial / note, and **🗑 Delete** (asks first),
+  name: every reject with its date and time (phone's local time), rig / serial / work order / note, and **🗑 Delete** (asks first),
   plus *Show photos*. **⤓ Rejects list (CSV for Excel)** shares/downloads all rejects.
 - Filter → Operator options read e.g. *Dusty 104 — 12 photos, 3 rejects* (operators with only rejects are listed too);
   with an operator selected, the results show *⛔ 3 rejects logged ›*.
-- Export ZIP: `rejects.csv` (one row per reject, local time, operator + number, rig, serial, note, logged_by, id),
+- Export ZIP: `rejects.csv` (one row per reject, local time, operator + number, rig, serial, work_order, note, logged_by, id),
   `rejects_by_operator.csv` (counts), and `rejects` in metadata.json; import restores missing rejects.
 - Storage: IndexedDB store `rejects` (DB version 3). Delete is soft (`deletedAt`) in team mode.
 - Team sync: table `public.rejects` (`supabase/migrations/004_rejects.sql`, same RLS as photos: authenticated only, no
   DELETE). Rejects go through the outbox like photos (offline → queued). If the table doesn't exist yet (PostgREST
   `404 PGRST205`, or `42P01` / `42501`), the phone keeps them in `meta.rejectBacklog`, the pill still shows ✓ Synced,
   and it re-checks at most every 5 minutes, then uploads them (last-write-wins by `client_updated_at`).
+- Work order # (`workOrder` on the record, column `rejects.work_order`, `supabase/migrations/005_reject_work_order.sql`).
+  Until 005 is run, rejects upload without it (PGRST204 / 42703 detection, like `photos.operator`), each phone keeps
+  its work orders (`meta.workOrderBacklog`, pill stays ✓ Synced) and fills them in on the server (work_order-only PATCH
+  where still empty) once the column exists; pulling rows without the column never clears a local work order.
 
 ## Shared team library (optional)
 1. Follow `SUPABASE_SETUP.md` (free Supabase project → run `supabase/setup.sql` → create the team user → turn off sign-ups).
@@ -116,7 +121,8 @@ team project.
 - `/workspace/.pwvenv/bin/python /workspace/hbtest/test_sync.py`: two phones against an in-memory fake Supabase
   (`hbtest/mock_supabase.py`), including the upgrade from the current `main` version with photos already on the phone,
   a server without the `stage` column (then migrated), a phone still on the old version editing a Before photo,
-  the operator column, and the reject log (no table → kept on the phone → migrated → second phone, undo/delete, offline).
+  the operator column, the reject log (no table → kept on the phone → migrated → second phone, undo/delete, offline),
+  and the reject work order column (no column → kept on the phone → 005 run → filled in, second phone).
 
 ## Hosting
 Any static HTTPS host works (service workers and install need HTTPS; `localhost` also works for testing).

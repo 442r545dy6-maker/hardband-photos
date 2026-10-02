@@ -92,18 +92,25 @@ function applyPhotoRow(p, r) {
   if (!('thumb' in p)) p.thumb = null;
   return p;
 }
-// Rejected-wire log (table public.rejects, migration 004_rejects.sql).
+// Rejected-wire log (table public.rejects, migration 004_rejects.sql; work_order added by 005_reject_work_order.sql).
 function rejectToRow(r) {
   return {
     id: r.id, operator: String(r.operator || '').trim().replace(/\s+/g, ' ') || null, rejected_at: tsIso(r.rejectedAt),
     rig_id: r.rigId || '', rig_name: r.rigName || null, serial_number: r.serialNumber || '', note: r.note || '',
+    work_order: String(r.workOrder || '').trim() || null,
     client_updated_at: Math.round(r.updatedAt || r.rejectedAt || 0) || 0, deleted_at: tsIso(r.deletedAt),
     created_by_name: r.loggedBy || null, updated_by_name: S.meta.syncName || null,
   };
 }
-function rowToReject(r) {
+function rowToReject(r, local) {
   const it = { id: r.id, operator: r.operator || '', rejectedAt: tsMs(r.rejected_at) || tsMs(r.created_at) || Date.now(), rigId: r.rig_id || '',
     rigName: r.rig_name || '', serialNumber: r.serial_number || '', note: r.note || '', loggedBy: r.created_by_name || '', updatedAt: Number(r.client_updated_at) || 0 };
+  // Work order (same rule as the photo operator): a real value always wins. An empty one clears it, except while this
+  // phone still has to upload its work order (saved before the server had the column) — then the local value is kept
+  // until the catch-up. No 'work_order' key at all = server not migrated yet (005): keep what this phone has.
+  const mine = (local && local.workOrder) || '';
+  if ('work_order' in r) it.workOrder = r.work_order ? String(r.work_order) : ((S.meta.workOrderBacklog || []).includes(r.id) ? mine : '');
+  else it.workOrder = mine;
   if (r.deleted_at) it.deletedAt = tsMs(r.deleted_at);
   return it;
 }
@@ -141,10 +148,12 @@ async function sbFetch(path, { method = 'GET', headers = {}, body, timeout } = {
 // run, PostgREST answers 400 PGRST204 "Could not find the 'stage' column of 'photos' in the schema cache"
 // (42703 "column photos.stage does not exist" on a select). missingCol() tells which column the server lacks.
 const OPT_COLS = ['stage', 'operator'];
-const missingCol = (e) => {
+// Reject columns added by later migrations: work_order (005_reject_work_order.sql). Same detection as for photos.
+const REJECT_OPT_COLS = ['work_order'];
+const missingCol = (e, cols = OPT_COLS) => {
   if (!e || e.status !== 400) return '';
   const msg = e.message || '';
-  return OPT_COLS.find((c) => new RegExp(`'${c}' column|column [\\w."]*\\b${c}\\b`, 'i').test(msg)) || '';
+  return cols.find((c) => new RegExp(`'${c}' column|column [\\w."]*\\b${c}\\b`, 'i').test(msg)) || '';
 };
 const isNoStageCol = (e) => missingCol(e) === 'stage';
 // Table public.rejects not created yet (migration 004_rejects.sql not run): PostgREST answers 404 PGRST205 "Could not
@@ -161,7 +170,7 @@ const downloadObj = async (path) => { const res = await sbFetch(objPath(path), {
 
 /* ---------- the engine ---------- */
 const Sync = {
-  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, operatorCol: null, operatorCheckedAt: 0, rejectsTable: null, rejectsCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
+  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, operatorCol: null, operatorCheckedAt: 0, workOrderCol: null, workOrderCheckedAt: 0, rejectsTable: null, rejectsCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
   get session() { return S.meta.syncSession || null; },
   get signedIn() { return !!(HB_CFG.on && this.session && this.session.refresh_token); },
 
@@ -273,6 +282,7 @@ const Sync = {
     await this.stageCatchUp();
     await this.operatorCatchUp();
     await this.rejectsCatchUp();
+    await this.workOrderCatchUp();
     const entries = (await db.all('outbox')).sort((a, b) => a.at - b.at);
     if (!entries.length) return;
     const order = { customers: 0, rigs: 1, pipeSpecs: 2, photos: 3, rejects: 4 };
@@ -320,8 +330,59 @@ const Sync = {
     const backlog = S.meta.rejectBacklog || [], add = ids.filter((id) => !backlog.includes(id));
     if (add.length) await setMeta('rejectBacklog', backlog.concat(add));
   },
+  // Until the server has the 'work_order' column (005_reject_work_order.sql), PostgREST answers 400 PGRST204 (or
+  // 42703): the rows are sent again without it (so sync never breaks and the pill stays ✓ Synced), the phone keeps the
+  // value, and rejects that have one are remembered (meta.workOrderBacklog) and filled in once the column exists.
   async upsertRejects(recs) {
-    for (let i = 0; i < recs.length; i += 200) await upsertRows('rejects', recs.slice(i, i + 200).map(rejectToRow));
+    for (let i = 0; i < recs.length; i += 200) {
+      const chunk = recs.slice(i, i + 200), rows = chunk.map(rejectToRow);
+      const drop = () => rows.forEach((x) => { delete x.work_order; });
+      if (this.workOrderCol === false) drop();
+      for (;;) {
+        try { await upsertRows('rejects', rows); break; }
+        catch (e) {
+          if (missingCol(e, REJECT_OPT_COLS) !== 'work_order' || !('work_order' in rows[0])) throw e;
+          if (this.workOrderCol !== false) console.warn('sync: server has no rejects.work_order column yet (run 005_reject_work_order.sql) — uploading without it');
+          this.workOrderCol = false; this.workOrderCheckedAt = Date.now();
+          drop();
+        }
+      }
+      if ('work_order' in rows[0]) { this.workOrderCol = true; continue; }
+      const backlog = S.meta.workOrderBacklog || [];
+      const add = chunk.filter((r) => rejectToRow(r).work_order && !backlog.includes(r.id)).map((r) => r.id);
+      if (add.length) await setMeta('workOrderBacklog', backlog.concat(add));
+    }
+  },
+  // Rejects uploaded while the column was missing get their work order filled in once it exists (checked at most
+  // every 5 min). A work_order-only PATCH, and only where the server's value is still empty (like the operator
+  // catch-up): it keeps the row's edit time and never overwrites a work order set since by another phone.
+  async workOrderCatchUp() {
+    const backlog = S.meta.workOrderBacklog || [];
+    if (!backlog.length || this.rejectsParked()) return false;
+    if (this.workOrderCol === false && Date.now() - (this.workOrderCheckedAt || 0) < 300000) return false;
+    this.workOrderCheckedAt = Date.now();
+    try { await sbFetch('/rest/v1/rejects?select=id,work_order&limit=1'); }
+    catch (e) {
+      if (missingCol(e, REJECT_OPT_COLS) === 'work_order') { this.workOrderCol = false; return false; }
+      if (isNoTable(e)) return false;
+      throw e;
+    }
+    this.workOrderCol = true;
+    const by = new Map();
+    for (const id of backlog) {
+      const r = await db.get('rejects', id), v = r && rejectToRow(r).work_order;
+      if (v) { if (!by.has(v)) by.set(v, []); by.get(v).push(id); }
+    }
+    for (const [v, list] of by) {
+      for (let i = 0; i < list.length; i += 100) {
+        const ids = list.slice(i, i + 100).map((x) => `"${String(x).replace(/["\\]/g, '')}"`).join(',');
+        await sbFetch(`/rest/v1/rejects?id=in.(${encodeURIComponent(ids)})&work_order=is.null`, { method: 'PATCH', body: JSON.stringify({ work_order: v }),
+          headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' } });
+      }
+    }
+    const left = (S.meta.workOrderBacklog || []).filter((id) => !backlog.includes(id)); // added while uploading
+    await setMeta('workOrderBacklog', left);
+    return true;
   },
   async pushRejects(entries) {
     if (!entries.length) return;
@@ -381,8 +442,10 @@ const Sync = {
       const dirty = outbox.get(`rejects:${r.id}`), local = await db.get('rejects', r.id);
       const lts = local ? (local.updatedAt || 0) : -1, rts = Number(r.client_updated_at) || 0;
       if (local && (dirty || backlog.has(r.id)) && lts > rts) continue;                        // our newer edit wins; it will upload
-      if (local && lts === rts && !!local.deletedAt === !!r.deleted_at) { if (dirty) await outboxDone(dirty); continue; } // already have it
-      const it = rowToReject(r);
+      // (a work order filled in later by another phone's catch-up PATCH keeps the edit time, so compare it too)
+      const sameExtra = local && (!r.work_order || r.work_order === local.workOrder);
+      if (local && lts === rts && sameExtra && !!local.deletedAt === !!r.deleted_at) { if (dirty) await outboxDone(dirty); continue; } // already have it
+      const it = rowToReject(r, local);
       await db.put('rejects', it);
       S.rejects = S.rejects.filter((x) => x.id !== it.id);
       if (!it.deletedAt) S.rejects.push(it);
