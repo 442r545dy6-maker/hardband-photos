@@ -86,7 +86,7 @@ const S = {
   queue: [], qIndex: 0, savedCount: 0, batchValues: null, lastSaved: null, keepJoint: false,
   context: null, addContext: null, lastListHash: '#/', lastList: [], manageTab: 'rigs',
   viewUrls: [], scroll: {}, modalCancel: null,
-  inspection: null, addInspect: false, // inspection session: { rigName, rigId, customerId, count, ready }
+  inspection: null, addInspect: false, // inspection session: { workOrder, rigName, rigId, customerId, pipeSpecId, operator, count, ready }
 };
 const KINDS = {
   rigs: { store: 'rigs', field: 'name', label: 'Rig', plural: 'Rigs', ref: 'rigId', notes: true, prefix: 'r' },
@@ -554,7 +554,7 @@ const hasSearch = () => { const s = S.search; return !!(s.q.trim() || s.customer
 const filterCount = () => { const s = S.search; return [s.op, s.customerId, s.rigId, s.end, s.stage, s.from, s.to].filter(Boolean).length; };
 function haystack(p) {
   return [labelOf('customers', p.customerId), labelOf('rigs', p.rigId), (S.rigs.get(p.rigId) || {}).notes, labelOf('pipeSpecs', p.pipeSpecId),
-    p.serialNumber, p.end, p.bandNumber ? 'B' + p.bandNumber : '', p.notes, isoDay(p.createdAt), STAGES[stageOf(p)].words, cleanOp(p.operator)].join(' \u0001 ').toLowerCase();
+    p.serialNumber, p.end, p.bandNumber ? 'B' + p.bandNumber : '', p.notes, isoDay(p.createdAt), STAGES[stageOf(p)].words, cleanOp(p.operator), p.workOrder || ''].join(' \u0001 ').toLowerCase();
 }
 function searchPhotos() {
   const s = S.search;
@@ -736,11 +736,13 @@ function renderFolder(ck, rk) {
   setChrome({ title: `${labelOf('customers', ck) || 'No customer'} / ${rig ? rig.name : 'No rig'}`, back: '#/', bottom: true });
   const groups = jointGroups(list);
   S.lastList = groups.flatMap((g) => g.ps.map((p) => p.id));
+  const wos = [...new Set(list.slice().sort((a, b) => b.createdAt - a.createdAt).map((p) => p.workOrder).filter(Boolean))];
   view.innerHTML = `
     <div class="card">
       <div class="muted small">${esc(labelOf('customers', ck) || 'No customer')}</div>
       <div style="font-size:22px;font-weight:800" id="folderRigName">${esc(rig ? rig.name : 'No rig')}</div>
       ${rig && rig.notes ? `<div class="muted small" style="margin-top:4px">${esc(rig.notes)}</div>` : ''}
+      ${wos.length ? `<div class="muted small" style="margin-top:4px" id="folderWo">Work order # ${wos.map(esc).join(', ')}</div>` : ''}
       <div class="muted small" style="margin-top:6px">${list.length} photo${list.length === 1 ? '' : 's'} · ${groups.length} joint${groups.length === 1 ? '' : 's'}${list.length ? ` <span id="folderStages">(${list.filter((p) => stageOf(p) === 'pre').length} before · ${list.filter((p) => stageOf(p) === 'post').length} after)</span>` : ''}. New photos taken here go in this folder.</div>
       ${rig ? `<button class="btn ghost block" id="editRigBtn" style="margin-top:10px">✎ Rename / edit rig</button>` : ''}
     </div>
@@ -772,6 +774,7 @@ function renderPhoto(id) {
       <dl class="kv" id="detailFields">
         <dt>Stage</dt><dd id="detailStage">${stageBadge(p)} ${esc(STAGES[stageOf(p)].label)}</dd>
         <dt>Operator</dt><dd id="detailOp">${opLinkHTML(p)}</dd>
+        <dt>Work order #</dt><dd id="detailWo">${esc(p.workOrder || '—')}</dd>
         <dt>Customer</dt><dd>${esc(labelOf('customers', p.customerId) || '—')}</dd>
         <dt>Rig</dt><dd>${esc(rig.name || '—')}${rig.notes ? `<div class="muted small">${esc(rig.notes)}</div>` : ''}</dd>
         <dt>Pipe spec</dt><dd>${esc(labelOf('pipeSpecs', p.pipeSpecId) || '—')}</dd>
@@ -1125,6 +1128,7 @@ async function saveQueued(v) {
   const it = S.queue[S.qIndex];
   const now = Date.now();
   const p = { id: uid(), blob: it.blob, thumb: it.thumb, width: it.width, height: it.height, createdAt: it.createdAt, dateSource: it.dateSource, addedAt: now, updatedAt: now, origName: it.origName, ...v };
+  if (S.addInspect && S.inspection && S.inspection.workOrder) p.workOrder = S.inspection.workOrder; // the job this inspection is for
   await putPhoto(p);
   S.photos.push(p);
   markDirty('photos', p.id);
@@ -1171,7 +1175,7 @@ async function handleFiles(fileList) {
   const insp = S.inspection;
   if (insp && insp.ready) { await insp.ready.catch(() => null); await new Promise((r) => setTimeout(r, 0)); } // let its folder view settle first
   const inSession = !!(S.inspection && S.inspection.rigId);
-  const addCtx = inSession ? { rigId: S.inspection.rigId, customerId: S.inspection.customerId } : S.context ? { ...S.context } : null;
+  const addCtx = inSession ? { rigId: S.inspection.rigId, customerId: S.inspection.customerId, ...(S.inspection.pipeSpecId ? { pipeSpecId: S.inspection.pipeSpecId } : {}) } : S.context ? { ...S.context } : null;
   const keep = S.keepJoint; S.keepJoint = false;
   const b = busy(files.length > 1 ? `Preparing 1 of ${files.length}…` : 'Preparing photo…');
   const q = []; let failed = 0;
@@ -1187,52 +1191,92 @@ async function handleFiles(fileList) {
 }
 
 /* ================= inspection session (Start inspection) ================= */
-// One required field (rig). "Open camera" is a <label for="camInput">, so the camera opens inside the same tap
-// (iOS only opens a file/camera picker from a direct user tap). The rig is looked up / created in the background;
-// handleFiles waits for it before building the form.
+// Job details first, in this order: Work order #, Rig, Customer, Pipe size (= the pipe spec list). All four are
+// required before the camera opens; each is typed or picked from suggestions, and a name that isn't in the list yet
+// is added on the spot (a case-insensitive match reuses the existing entry), so nothing can block a job in the field.
+// Customer and pipe size start with the last-used ones; the work order starts blank (it changes with every job) and
+// suggests recent ones. The operator picker is unchanged. "Open camera" is a <label for="camInput">, so the camera
+// opens inside the same tap (iOS only opens a file/camera picker from a direct user tap). The rig / customer / pipe
+// size are looked up / created in the background; handleFiles waits for them before building the form.
 const normRig = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+const cleanName = (s) => String(s || '').trim().replace(/\s+/g, ' ');
+const findLookup = (kind, name) => sortedItems(kind).find((x) => normRig(x[KINDS[kind].field]) === normRig(name));
+// Work orders used lately on this phone (photos and rejects), newest first: suggestions on the Start inspection sheet.
+function recentWorkOrders(n = 8) {
+  const all = [...S.photos.map((p) => [p.workOrder, p.addedAt || p.createdAt || 0]), ...S.rejects.map((r) => [r.workOrder, r.rejectedAt || 0])]
+    .filter((x) => x[0]).sort((a, b) => b[1] - a[1]).map((x) => x[0]);
+  return [...new Set(all)].slice(0, n);
+}
 function startInspectionSheet() {
   const lu = S.meta.lastUsed || {};
-  const rigs = sortedItems('rigs');
+  const listOf = (kind) => sortedItems(kind).map((x) => `<option value="${esc(x[KINDS[kind].field])}">`).join('');
   const m = openModal(`<h3>Start inspection</h3>
     <form id="inspForm" autocomplete="off">
       ${opFieldHTML('inspOp', currentOperator(), { wrapId: 'inspOpField', label: 'Operator (you)' })}
+      <div class="field"><label for="inspWo">Work order #</label>
+        <input id="inspWo" type="text" list="inspWoList" maxlength="60" placeholder="Type or pick the work order #" autocorrect="off" spellcheck="false" enterkeyhint="next">
+        <datalist id="inspWoList">${recentWorkOrders().map((w) => `<option value="${esc(w)}">`).join('')}</datalist>
+        <div class="small insp-msg" id="inspWoMsg" role="alert"></div></div>
       <div class="field"><label for="inspRigName">Rig name</label>
-        <input id="inspRigName" type="text" list="inspRigList" placeholder="Type or pick a rig" autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="go">
-        <datalist id="inspRigList">${rigs.map((r) => `<option value="${esc(r.name)}">`).join('')}</datalist>
+        <input id="inspRigName" type="text" list="inspRigList" placeholder="Type or pick a rig" autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="next">
+        <datalist id="inspRigList">${listOf('rigs')}</datalist>
         <div class="small insp-msg" id="inspMsg" role="alert"></div></div>
-      <div class="field"><label for="inspCust">Customer <span class="muted small">(optional)</span></label>
-        <select id="inspCust"><option value="">No customer</option>${opts('customers', S.customers.has(lu.customerId) ? lu.customerId : '')}</select></div>
+      <div class="field"><label for="inspCustName">Customer</label>
+        <input id="inspCustName" type="text" list="inspCustList" value="${esc(S.customers.has(lu.customerId) ? labelOf('customers', lu.customerId) : '')}" placeholder="Type or pick a customer" autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="next">
+        <datalist id="inspCustList">${listOf('customers')}</datalist>
+        <div class="small insp-msg" id="inspCustMsg" role="alert"></div></div>
+      <div class="field"><label for="inspSpecName">Pipe size <span class="muted small">(pipe spec)</span></label>
+        <input id="inspSpecName" type="text" list="inspSpecList" value="${esc(S.pipeSpecs.has(lu.pipeSpecId) ? labelOf('pipeSpecs', lu.pipeSpecId) : '')}" placeholder="Type or pick, e.g. 4-1/2&quot; Range 3, 450 Duo" autocorrect="off" spellcheck="false" enterkeyhint="go">
+        <datalist id="inspSpecList">${listOf('pipeSpecs')}</datalist>
+        <div class="small insp-msg" id="inspSpecMsg" role="alert"></div></div>
       <div class="stack form-actions">
         <label for="camInput" class="btn primary big block" id="inspCamBtn">📷 Open camera</label>
         <button type="button" class="btn ghost block" id="inspCancel">Cancel</button>
       </div>
     </form>`);
   const inp = $('#inspRigName', m);
+  // The job details, in order, with the message shown when one is missing.
+  const need = [['#inspWo', '#inspWoMsg', 'Type the work order # first.'], ['#inspRigName', '#inspMsg', 'Type the rig name first.'],
+    ['#inspCustName', '#inspCustMsg', 'Type or pick the customer first.'], ['#inspSpecName', '#inspSpecMsg', 'Type or pick the pipe size first.']]
+    .map(([f, msg, text]) => ({ el: $(f, m), msg: $(msg, m), text }));
+  const firstEmpty = () => need.find((n) => !cleanName(n.el.value));
   const opCtl = bindOpField('inspOp', { onChange: (l) => { if (l) rememberOperator(l, true); } });
-  setTimeout(() => inp.focus(), 50);
+  setTimeout(() => (firstEmpty() || need[0]).el.focus(), 50);
   const begin = (e) => {
-    const name = inp.value.trim().replace(/\s+/g, ' ');
-    if (!name) { if (e) e.preventDefault(); $('#inspMsg', m).textContent = 'Type the rig name first.'; inp.focus(); return false; }
+    const miss = firstEmpty();
+    if (miss) { if (e) e.preventDefault(); miss.msg.textContent = miss.text; miss.el.focus(); return false; }
     const op = opCtl.adding ? opCtl.commit() : opCtl.value;
     if (!op) { if (e) e.preventDefault(); if (!opCtl.adding) opCtl.say('Pick your name first (or ＋ Add new operator).'); return false; }
     rememberOperator(op, true);
-    beginInspection(name, $('#inspCust', m).value, op);
+    const [wo, rig, cust, spec] = need.map((n) => cleanName(n.el.value));
+    beginInspection({ workOrder: wo, rigName: rig, customerName: cust, specName: spec, operator: op });
     setTimeout(() => closeModal(true), 0); // after the tap has opened the camera
     return true;
   };
   $('#inspCamBtn', m).addEventListener('click', begin);
   $('#inspCancel', m).onclick = () => closeModal(true);
-  inp.addEventListener('input', () => { $('#inspMsg', m).textContent = ''; });
-  $('#inspForm', m).onsubmit = (e) => { e.preventDefault(); if (begin(null)) $('#camInput').click(); }; // Enter/Go key
+  for (const n of need) n.el.addEventListener('input', () => { n.msg.textContent = ''; });
+  // Next / Go / Enter on the keyboard: on to the next empty job field; with all four filled in, the keyboard closes
+  // so the big Open camera button is in view (the camera itself needs that tap on iOS).
+  need.forEach((n, i) => n.el.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const nxt = need.slice(i + 1).find((x) => !cleanName(x.el.value)) || firstEmpty();
+    if (nxt) nxt.el.focus(); else n.el.blur();
+  }));
+  $('#inspForm', m).onsubmit = (e) => { e.preventDefault(); if (begin(null)) $('#camInput').click(); };
 }
-function beginInspection(name, customerId, operator) {
-  const sess = { rigName: name, rigId: null, customerId: customerId || '', count: 0, operator: cleanOp(operator) };
+function beginInspection({ workOrder, rigName, customerName, specName, operator }) {
+  const sess = { workOrder: cleanName(workOrder), rigName, rigId: null, customerId: '', pipeSpecId: '', count: 0, operator: cleanOp(operator) };
   S.inspection = sess;
   sess.ready = (async () => {
-    const hit = sortedItems('rigs').find((r) => normRig(r.name) === normRig(name)); // same rig, any capitalisation
-    const rig = hit || await createLookup('rigs', { name });
+    // same name in any capitalisation / spacing = the existing entry; otherwise it's added (and synced) like any other
+    const cust = customerName ? (findLookup('customers', customerName) || await createLookup('customers', { name: customerName })) : null;
+    const spec = specName ? (findLookup('pipeSpecs', specName) || await createLookup('pipeSpecs', { description: specName })) : null;
+    const rig = findLookup('rigs', rigName) || await createLookup('rigs', { name: rigName });
+    sess.customerId = cust ? cust.id : ''; sess.pipeSpecId = spec ? spec.id : '';
     sess.rigId = rig.id; sess.rigName = rig.name;
+    await setMeta('lastUsed', { ...(S.meta.lastUsed || {}), customerId: sess.customerId, rigId: rig.id, pipeSpecId: sess.pipeSpecId }); // next sheet / photo starts with these
     if (S.inspection === sess) { location.hash = `#/folder/${encodeURIComponent(sess.customerId)}/${encodeURIComponent(rig.id)}`; drawInspBar(); }
     return rig;
   })();
@@ -1251,7 +1295,7 @@ function drawInspBar(v) {
   bar.hidden = !sess;
   if (!sess) return;
   $('#inspRig').textContent = (sess.rigId && labelOf('rigs', sess.rigId)) || sess.rigName;
-  $('#inspBarOp').textContent = sess.operator ? ` · 👷 ${sess.operator}` : '';
+  $('#inspBarOp').textContent = (sess.workOrder ? ` · WO ${sess.workOrder}` : '') + (sess.operator ? ` · 👷 ${sess.operator}` : '');
   $('#inspDone').hidden = v === 'add'; // the photo form has its own Save / Discard
 }
 
@@ -1311,13 +1355,14 @@ async function undoReject(r) {
 function logRejectSheet() {
   const lu = S.meta.lastUsed || {};
   const rigId = (S.inspection && S.inspection.rigId) || (S.rigs.has(lu.rigId) ? lu.rigId : '');
+  const inspWo = (S.inspection && S.inspection.workOrder) || ''; // during an inspection: that job's work order
   const m = openModal(`<h3>⛔ Log a rejected wire</h3>
     <p class="muted small">Saved with the operator and the time: <b id="rejWhen">${esc(fmtDate(Date.now()))}</b></p>
     ${opFieldHTML('rejOp', currentOperator(), { wrapId: 'rejOpField', label: 'Operator' })}
     <details class="more-box" id="rejMore"><summary>Add details <span class="muted small" id="rejMoreSum"></span></summary>
       <div class="field"><label for="rejRig">Rig</label><select id="rejRig"><option value="">No rig</option>${opts('rigs', rigId)}</select></div>
       <div class="field"><label for="rejSerial">Serial number</label><input id="rejSerial" type="text" placeholder="Stamped serial / joint #" autocapitalize="characters" autocorrect="off" spellcheck="false" autocomplete="off"></div>
-      <div class="field"><label for="rejWo">Work order #</label><input id="rejWo" type="text" maxlength="60" placeholder="e.g. WO-12345" autocorrect="off" spellcheck="false" autocomplete="off"></div>
+      <div class="field"><label for="rejWo">Work order #</label><input id="rejWo" type="text" maxlength="60" value="${esc(inspWo)}" placeholder="e.g. WO-12345" autocorrect="off" spellcheck="false" autocomplete="off"></div>
       <div class="field"><label for="rejNote">Note</label><input id="rejNote" type="text" maxlength="200" placeholder="e.g. porosity, cracks, bad wire" autocomplete="off"></div>
     </details>
     <div class="stack form-actions">
@@ -1325,9 +1370,10 @@ function logRejectSheet() {
       <button type="button" class="btn ghost block" id="rejCancel">Cancel</button>
     </div>`);
   const ctl = bindOpField('rejOp');
-  const sum = () => { const rn = labelOf('rigs', $('#rejRig', m).value); $('#rejMoreSum', m).textContent = `rig, serial, work order, note — optional${rn ? ` · Rig: ${rn}` : ''}`; };
+  const sum = () => { const rn = labelOf('rigs', $('#rejRig', m).value), wo = $('#rejWo', m).value.trim(); $('#rejMoreSum', m).textContent = `rig, serial, work order, note — optional${rn ? ` · Rig: ${rn}` : ''}${wo ? ` · WO: ${wo}` : ''}`; };
   sum();
   $('#rejRig', m).addEventListener('change', sum);
+  $('#rejWo', m).addEventListener('input', sum);
   $('#rejCancel', m).onclick = () => closeModal(true);
   $('#rejOk', m).onclick = async () => {
     const op = ctl.adding ? ctl.commit() : ctl.value;
@@ -1541,13 +1587,13 @@ async function exportZip() {
       try { await Sync.ensureBlob(need[i]); } catch (e) { /* skipped below */ }
     }
     let skippedFiles = 0;
-    const rows = [['file', 'id', 'taken', 'stage', 'operator', 'customer', 'rig', 'rig_notes', 'pipe_spec', 'serial_number', 'end', 'band', 'condition_notes', 'added']];
+    const rows = [['file', 'id', 'taken', 'stage', 'operator', 'work_order', 'customer', 'rig', 'rig_notes', 'pipe_spec', 'serial_number', 'end', 'band', 'condition_notes', 'added']];
     const jsonPhotos = [];
     photos.forEach((p, i) => {
       const rig = S.rigs.get(p.rigId) || {};
       const path = `${safeName(labelOf('customers', p.customerId) || 'No customer')}/${safeName(rig.name || 'No rig')}/${exportFileName(p)}`;
       if (p.blob) zip.file(path, p.blob, { binary: true, date: new Date(p.createdAt) }); else skippedFiles++;
-      rows.push([path, p.id, isoLocal(p.createdAt), STAGES[stageOf(p)].label, cleanOp(p.operator), labelOf('customers', p.customerId), rig.name || '', rig.notes || '', labelOf('pipeSpecs', p.pipeSpecId),
+      rows.push([path, p.id, isoLocal(p.createdAt), STAGES[stageOf(p)].label, cleanOp(p.operator), p.workOrder || '', labelOf('customers', p.customerId), rig.name || '', rig.notes || '', labelOf('pipeSpecs', p.pipeSpecId),
         p.serialNumber || '', p.end || '', p.bandNumber || '', p.notes || '', p.addedAt ? isoLocal(p.addedAt) : '']);
       const { blob, thumb, ...meta } = p;
       jsonPhotos.push({ ...meta, stage: stageOf(p), file: path, customer: labelOf('customers', p.customerId), rig: rig.name || '', pipeSpec: labelOf('pipeSpecs', p.pipeSpecId) });

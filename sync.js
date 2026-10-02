@@ -66,6 +66,7 @@ function photoToRow(p) {
     client_updated_at: Math.round(stampOf('photos', p)) || 0, deleted_at: tsIso(p.deletedAt), updated_by_name: S.meta.syncName || null,
     stage: p.stage === 'pre' ? 'pre' : 'post', // 'pre' = before hardband (inspection); photos without a stage count as 'post'
     operator: String(p.operator || '').trim().replace(/\s+/g, ' ') || null, // "Name Number", e.g. "Dusty 104" (migration 003)
+    work_order: String(p.workOrder || '').trim() || null, // Work order # from Start inspection (migration 006)
   };
 }
 function applyPhotoRow(p, r) {
@@ -86,6 +87,11 @@ function applyPhotoRow(p, r) {
   if ('operator' in r) {
     if (r.operator) p.operator = String(r.operator);
     else if (!(S.meta.operatorBacklog || []).includes(r.id)) p.operator = '';
+  }
+  // Work order (migration 006): same rule as the operator.
+  if ('work_order' in r) {
+    if (r.work_order) p.workOrder = String(r.work_order);
+    else if (!(S.meta.photoWorkOrderBacklog || []).includes(r.id)) p.workOrder = '';
   }
   if (r.deleted_at) p.deletedAt = tsMs(r.deleted_at); else delete p.deletedAt;
   if (!('blob' in p)) p.blob = null;
@@ -144,10 +150,13 @@ async function sbFetch(path, { method = 'GET', headers = {}, body, timeout } = {
   if (!res.ok) { const err = new SyncError(await errText(res), res.status >= 500 ? 'server' : 'http', res.status); err.code = await errCode(res); throw err; }
   return res;
 }
-// Photo columns added by later migrations: stage (002_stage.sql), operator (003_operator.sql). Until a migration is
+// Photo columns added by later migrations: stage (002_stage.sql), operator (003_operator.sql), work_order
+// (006_photo_work_order.sql). Until a migration is
 // run, PostgREST answers 400 PGRST204 "Could not find the 'stage' column of 'photos' in the schema cache"
 // (42703 "column photos.stage does not exist" on a select). missingCol() tells which column the server lacks.
-const OPT_COLS = ['stage', 'operator'];
+const OPT_COLS = ['stage', 'operator', 'work_order'];
+// Name used for each column's Sync flags (<name>Col / <name>CheckedAt) and its meta.<name>Backlog list.
+const COL_KEY = { stage: 'stage', operator: 'operator', work_order: 'photoWorkOrder' };
 // Reject columns added by later migrations: work_order (005_reject_work_order.sql). Same detection as for photos.
 const REJECT_OPT_COLS = ['work_order'];
 const missingCol = (e, cols = OPT_COLS) => {
@@ -170,7 +179,7 @@ const downloadObj = async (path) => { const res = await sbFetch(objPath(path), {
 
 /* ---------- the engine ---------- */
 const Sync = {
-  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, operatorCol: null, operatorCheckedAt: 0, workOrderCol: null, workOrderCheckedAt: 0, rejectsTable: null, rejectsCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
+  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, operatorCol: null, operatorCheckedAt: 0, photoWorkOrderCol: null, photoWorkOrderCheckedAt: 0, workOrderCol: null, workOrderCheckedAt: 0, rejectsTable: null, rejectsCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
   get session() { return S.meta.syncSession || null; },
   get signedIn() { return !!(HB_CFG.on && this.session && this.session.refresh_token); },
 
@@ -281,6 +290,7 @@ const Sync = {
   async push() {
     await this.stageCatchUp();
     await this.operatorCatchUp();
+    await this.photoWorkOrderCatchUp();
     await this.rejectsCatchUp();
     await this.workOrderCatchUp();
     const entries = (await db.all('outbox')).sort((a, b) => a.at - b.at);
@@ -353,36 +363,48 @@ const Sync = {
       if (add.length) await setMeta('workOrderBacklog', backlog.concat(add));
     }
   },
-  // Rejects uploaded while the column was missing get their work order filled in once it exists (checked at most
-  // every 5 min). A work_order-only PATCH, and only where the server's value is still empty (like the operator
-  // catch-up): it keeps the row's edit time and never overwrites a work order set since by another phone.
-  async workOrderCatchUp() {
-    const backlog = S.meta.workOrderBacklog || [];
-    if (!backlog.length || this.rejectsParked()) return false;
-    if (this.workOrderCol === false && Date.now() - (this.workOrderCheckedAt || 0) < 300000) return false;
-    this.workOrderCheckedAt = Date.now();
-    try { await sbFetch('/rest/v1/rejects?select=id,work_order&limit=1'); }
+  // Records uploaded while a text column was missing get that value filled in once it exists (checked at most every
+  // 5 min): a one-column PATCH, and only where the server's value is still empty (like the operator catch-up), so it
+  // keeps the row's edit time and never overwrites a value set since by another phone.
+  // flag = name of the Sync flags (<flag>Col / <flag>CheckedAt); valueOf(id) = the value this phone has (or empty).
+  async fillInLater({ table, col, flag, backlogKey, valueOf }) {
+    const backlog = S.meta[backlogKey] || [];
+    if (!backlog.length) return false;
+    if (this[flag + 'Col'] === false && Date.now() - (this[flag + 'CheckedAt'] || 0) < 300000) return false;
+    this[flag + 'CheckedAt'] = Date.now();
+    try { await sbFetch(`/rest/v1/${table}?select=id,${col}&limit=1`); }
     catch (e) {
-      if (missingCol(e, REJECT_OPT_COLS) === 'work_order') { this.workOrderCol = false; return false; }
-      if (isNoTable(e)) return false;
+      if (missingCol(e, [col]) === col) { this[flag + 'Col'] = false; return false; }
+      if (table === 'rejects' && isNoTable(e)) return false;
       throw e;
     }
-    this.workOrderCol = true;
+    this[flag + 'Col'] = true;
     const by = new Map();
     for (const id of backlog) {
-      const r = await db.get('rejects', id), v = r && rejectToRow(r).work_order;
+      const v = await valueOf(id);
       if (v) { if (!by.has(v)) by.set(v, []); by.get(v).push(id); }
     }
     for (const [v, list] of by) {
       for (let i = 0; i < list.length; i += 100) {
         const ids = list.slice(i, i + 100).map((x) => `"${String(x).replace(/["\\]/g, '')}"`).join(',');
-        await sbFetch(`/rest/v1/rejects?id=in.(${encodeURIComponent(ids)})&work_order=is.null`, { method: 'PATCH', body: JSON.stringify({ work_order: v }),
+        await sbFetch(`/rest/v1/${table}?id=in.(${encodeURIComponent(ids)})&${col}=is.null`, { method: 'PATCH', body: JSON.stringify({ [col]: v }),
           headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' } });
       }
     }
-    const left = (S.meta.workOrderBacklog || []).filter((id) => !backlog.includes(id)); // added while uploading
-    await setMeta('workOrderBacklog', left);
+    const left = (S.meta[backlogKey] || []).filter((id) => !backlog.includes(id)); // added while uploading
+    await setMeta(backlogKey, left);
     return true;
+  },
+  // Rejects uploaded while rejects.work_order was missing (005_reject_work_order.sql).
+  async workOrderCatchUp() {
+    if (this.rejectsParked()) return false;
+    return this.fillInLater({ table: 'rejects', col: 'work_order', flag: 'workOrder', backlogKey: 'workOrderBacklog',
+      valueOf: async (id) => { const r = await db.get('rejects', id); return r && rejectToRow(r).work_order; } });
+  },
+  // Photos uploaded while photos.work_order was missing (006_photo_work_order.sql).
+  photoWorkOrderCatchUp() {
+    return this.fillInLater({ table: 'photos', col: 'work_order', flag: 'photoWorkOrder', backlogKey: 'photoWorkOrderBacklog',
+      valueOf: async (id) => { const p = await photoRecord(id); return p && photoToRow(p).work_order; } });
   },
   async pushRejects(entries) {
     if (!entries.length) return;
@@ -454,25 +476,25 @@ const Sync = {
     }
   },
 
-  // Upload one photo row. Until the server has the 'stage' / 'operator' column, send the row without it (so sync
-  // never breaks) and remember the photo, so that value is uploaded once the column exists.
+  // Upload one photo row. Until the server has the 'stage' / 'operator' / 'work_order' column, send the row without
+  // it (so sync never breaks) and remember the photo, so that value is uploaded once the column exists.
   async upsertPhoto(p) {
     const row = photoToRow(p), dropped = [];
-    for (const c of OPT_COLS) if (this[c + 'Col'] === false) { delete row[c]; dropped.push(c); }
+    for (const c of OPT_COLS) if (this[COL_KEY[c] + 'Col'] === false) { delete row[c]; dropped.push(c); }
     for (;;) {
       try { await upsertRows('photos', [row]); break; }
       catch (e) {
         const c = missingCol(e);
         if (!c || !(c in row)) throw e;
-        this[c + 'Col'] = false; this[c + 'CheckedAt'] = Date.now();
+        this[COL_KEY[c] + 'Col'] = false; this[COL_KEY[c] + 'CheckedAt'] = Date.now();
         console.warn(`sync: server has no photos.${c} column yet — uploading without it`);
         delete row[c]; dropped.push(c);
       }
     }
-    for (const c of OPT_COLS) if (c in row) this[c + 'Col'] = true;
+    for (const c of OPT_COLS) if (c in row) this[COL_KEY[c] + 'Col'] = true;
     for (const c of dropped) {
-      if (c === 'operator' && !photoToRow(p).operator) continue; // no operator on this photo: nothing to fill in later
-      const key = c + 'Backlog', backlog = S.meta[key] || [];
+      if (c !== 'stage' && !photoToRow(p)[c]) continue; // no operator / work order on this photo: nothing to fill in later
+      const key = COL_KEY[c] + 'Backlog', backlog = S.meta[key] || [];
       if (!backlog.includes(p.id)) await setMeta(key, backlog.concat(p.id));
     }
   },
@@ -571,7 +593,7 @@ const Sync = {
         const lts = stampOf('photos', p);
         if (p && dirty && lts > rts) continue;
         // (an operator filled in later by another phone's catch-up PATCH keeps the edit time, so compare it too)
-        const sameExtra = p && (!r.operator || r.operator === p.operator);
+        const sameExtra = p && (!r.operator || r.operator === p.operator) && (!r.work_order || r.work_order === p.workOrder);
         if (p && !dirty && lts === rts && sameExtra && !!p.deletedAt === !!r.deleted_at && (p.remoteImage || !r.image_path)) continue;
         p = applyPhotoRow(p || { blob: null, thumb: null }, r);
         if (p.deletedAt) { p.blob = null; p.thumb = null; } // someone deleted it; a copy stays on the server

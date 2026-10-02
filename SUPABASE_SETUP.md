@@ -93,6 +93,18 @@ minutes after it's run. Until then, other phones don't see who took a photo, and
 Phones keep working before you run it: a work order typed under *Add details* stays on that phone and is uploaded by
 itself within a few minutes after it's run. Until then, other phones see the reject without its work order.
 
+### ▶ Then: Work order # on photos (Start inspection) — one line, run it once
+1. **SQL Editor** → new, empty query.
+2. Paste this single line and click **Run** (it has no quote marks, so iPhone "smart quotes" can't break it):
+
+   alter table public.photos add column if not exists work_order text;
+
+   (It's also the last line of `supabase/migrations/006_photo_work_order.sql`.) "Success. No rows returned" means it
+   worked; running it again is safe. It only adds one column; nothing is changed or deleted.
+
+Phones keep working before you run it: the work order typed on **Start inspection** stays with each photo on the
+phone and is uploaded by itself within a few minutes after it's run.
+
 ## 4. Create the team login
 1. In the left sidebar, click **Authentication**, then **Users**.
 2. Click **Add user**, then **Create new user**.

@@ -13,6 +13,8 @@ optionally, in a **shared team library** (Supabase), so the whole crew sees the 
 - `supabase/migrations/004_rejects.sql`: adds the `rejects` table (reject log) **and** repeats 003, so it is the one file
   to run on a project that has neither yet
 - `supabase/migrations/005_reject_work_order.sql`: adds `rejects.work_order` (Work order # on a reject; run after 004)
+- `supabase/migrations/006_photo_work_order.sql`: adds `photos.work_order` (Work order # from Start inspection). One
+  line, no quote characters, so it survives iPhone smart quotes
 - `SUPABASE_SETUP.md`: click-by-click setup for a non-developer
 - `manifest.webmanifest`, `sw.js`: installable + offline app shell (bump `VERSION` in sw.js when files change)
 - `vendor/jszip.min.js`: JSZip 3.10.1 (bundled locally for offline ZIP export/import)
@@ -27,9 +29,15 @@ Photos saved before this existed have no stage and count as `post`.
   porosity, Cracks, Needs repair, Eccentric band. Before hardband is a short inspection screen: rig + "Before hardband"
   header, serial number (focused), chips No hardband needed / Reapply / Repair / Eccentric band, and everything else under
   *More details*. Switching stage never clears typed notes (chips only add text to the notes).
-- **🔍 Start inspection** (home screen): a sheet whose only required field is the rig name (type it or pick a
-  suggestion; a case-insensitive match reuses the rig, otherwise it is created; customer optional, defaults to the
-  last-used one). **📷 Open camera** is a `<label for="camInput">` (`capture="environment"`), so the camera opens in
+- **🔍 Start inspection** (home screen): the job details come first, in this order, all required before the camera
+  opens: **Work order #** (starts blank, suggests recent ones), **Rig name**, **Customer**, **Pipe size** (the pipe spec
+  list; customer and pipe size start with the last-used ones). Each is typed or picked from suggestions; a
+  case-insensitive match reuses the entry, otherwise it is added on the spot, so a missing customer / pipe size never
+  blocks a job. The *Operator (you)* picker above them is unchanged. A missing field shows a message under it and gets
+  the focus; Next on the keyboard jumps to the next empty one. Every photo of the inspection carries the work order,
+  rig, customer, pipe spec and operator; the work order shows on the photo detail, in the folder card ("Work order #
+  …"), in the Inspecting strip, is searchable, and is prefilled in **⛔ Log rejected wire** opened during the
+  inspection (Rejects screen). **📷 Open camera** is a `<label for="camInput">` (`capture="environment"`), so the camera opens in
   the same tap. Each photo lands in the Before form for that rig; a blank serial asks "Save without a serial number?"
   (Add serial / Save anyway); **📷 Next photo** reopens the camera. An "Inspecting: [rig]" strip with **Done** shows
   until Done is tapped or the user goes back to the home screen.
@@ -62,7 +70,11 @@ It's part of the common photo record, so future record types (e.g. welding) inhe
   JPEG. Records without one show **No operator**.
 - Library **Filter → Operator**: All operators, Unassigned (no operator), and every operator found (with counts);
   works with search and the other filters. Tapping an operator name on a photo or comparison shows all their photos.
-- Export: `operator` column in metadata.csv / metadata.json.
+- Export: `operator` column in metadata.csv / metadata.json; `work_order` right after it (and `workOrder` in
+  metadata.json), restored by import.
+- Team sync: `photos.work_order` (`supabase/migrations/006_photo_work_order.sql`) with the same fallback as the operator:
+  until it's run, rows upload without it, the phone keeps the value (`meta.photoWorkOrderBacklog`, pill ✓ Synced) and
+  fills it in afterwards (work_order-only PATCH where still empty).
 - Team sync: `operator` column on `photos` (`supabase/migrations/003_operator.sql`). Until it's run, rows upload
   without it (same PGRST204 detection as `stage`) and each phone keeps its operators, then fills them in on the server
   (operator-only PATCH where still empty) once the column exists.
@@ -122,7 +134,8 @@ team project.
   (`hbtest/mock_supabase.py`), including the upgrade from the current `main` version with photos already on the phone,
   a server without the `stage` column (then migrated), a phone still on the old version editing a Before photo,
   the operator column, the reject log (no table → kept on the phone → migrated → second phone, undo/delete, offline),
-  and the reject work order column (no column → kept on the phone → 005 run → filled in, second phone).
+  the reject work order column (no column → kept on the phone → 005 run → filled in, second phone), and the photo
+  work order from Start inspection (same, for 006).
 
 ## Hosting
 Any static HTTPS host works (service workers and install need HTTPS; `localhost` also works for testing).
