@@ -12,11 +12,13 @@ optionally, in a **shared team library** (Supabase), so the whole crew sees the 
 - `supabase/migrations/003_operator.sql`: adds `photos.operator` (who did the work)
 - `supabase/migrations/004_rejects.sql`: adds the `rejects` table (reject log) **and** repeats 003, so it is the one file
   to run on a project that has neither yet
-- `supabase/migrations/005_reject_work_order.sql`: adds `rejects.work_order` (Work order # on a reject; run after 004)
+- `supabase/migrations/005_reject_work_order.sql`: adds `rejects.work_order` (Work order # on a reject; run after 004).
+  One line, no quote characters (like 006)
 - `supabase/migrations/006_photo_work_order.sql`: adds `photos.work_order` (Work order # from Start inspection). One
   line, no quote characters, so it survives iPhone smart quotes
 - `SUPABASE_SETUP.md`: click-by-click setup for a non-developer
-- `manifest.webmanifest`, `sw.js`: installable + offline app shell (bump `VERSION` in sw.js when files change)
+- `manifest.webmanifest`, `sw.js`: installable + offline app shell (bump `VERSION` in sw.js **and** `APP_VERSION` in
+  app.js, to the same value, when files change; the test suite checks they match)
 - `vendor/jszip.min.js`: JSZip 3.10.1 (bundled locally for offline ZIP export/import)
 - `icons/`: PNG icons (regenerate with `python3 make_icons.py`)
 - `screenshots/`: mobile screenshots from the automated test
@@ -103,6 +105,19 @@ Each rejected wire can be logged in two taps, and the app counts rejects per ope
   Until 005 is run, rejects upload without it (PGRST204 / 42703 detection, like `photos.operator`), each phone keeps
   its work orders (`meta.workOrderBacklog`, pill stays ✓ Synced) and fills them in on the server (work_order-only PATCH
   where still empty) once the column exists; pulling rows without the column never clears a local work order.
+
+## App updates
+- `sw.js` installs a new version in the background (files fetched with `cache: 'reload'`, so the 10-minute GitHub
+  Pages cache can't slip an older file in) and takes over right away (`skipWaiting` + `clients.claim`).
+- The open page checks at launch and whenever it comes back to the foreground (`visibilitychange` / `pageshow`, at most
+  once a minute): `registration.update()`, then it asks the newest finished service worker its `VERSION`
+  (`postMessage` + `MessageChannel`). If that is newer than `APP_VERSION`, a banner under the header says
+  **A new version of the app is ready. Tap to update.** with **Update** / **Not now**. A takeover while the page is
+  open (`controllerchange`) shows the banner too. It never reloads by itself.
+- **Not now** hides it until the next check. **Update** reloads, except: with an unsaved photo (Add photo form), a
+  photo edit, or an inspection in progress it asks first (*Save it first* / *Keep inspecting* or *Update anyway*);
+  while a sheet is open its backdrop covers the banner, so typed input can't be lost. Before reloading it waits for
+  pending IndexedDB outbox writes; queued team sync continues after the reload.
 
 ## Shared team library (optional)
 1. Follow `SUPABASE_SETUP.md` (free Supabase project → run `supabase/setup.sql` → create the team user → turn off sign-ups).

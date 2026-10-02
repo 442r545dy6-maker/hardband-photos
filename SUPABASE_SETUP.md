@@ -85,10 +85,13 @@ minutes after it's run. Until then, other phones don't see who took a photo, and
 
 ### ▶ Then: Work order # on rejects — run it once (after the file above)
 1. **SQL Editor** → new, empty query.
-2. Open this link, select everything, copy, and paste it into the editor:
-   https://raw.githubusercontent.com/442r545dy6-maker/hardband-photos/main/supabase/migrations/005_reject_work_order.sql
-3. Click **Run**. It only adds one column (`work_order` on the rejects table); nothing is changed or deleted, and it's
-   safe to run again. "Success. No rows returned" means it worked.
+2. Paste this single line and click **Run** (it has no quote marks, so iPhone "smart quotes" can't break it):
+
+   alter table public.rejects add column if not exists work_order text;
+
+   (It's also the last line of `supabase/migrations/005_reject_work_order.sql`, which has no quote marks either.)
+3. It only adds one column (`work_order` on the rejects table); nothing is changed or deleted, and it's safe to run
+   again. "Success. No rows returned" means it worked.
 
 Phones keep working before you run it: a work order typed under *Add details* stays on that phone and is uploaded by
 itself within a few minutes after it's run. Until then, other phones see the reject without its work order.

@@ -72,6 +72,10 @@ body.with-insp-btn { padding-bottom: calc(170px + var(--safe-b)); }
 .insp-bar { display: flex; align-items: center; gap: 10px; padding: 6px 12px; background: #dfe7ee; border-bottom: 1px solid var(--line); font-size: 16px; color: var(--steel); }
 .insp-bar .insp-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .insp-bar .insp-done { min-height: 44px; padding: 0 16px; flex: none; }
+/* "A new version of the app is ready" banner: the Inspecting strip's look, kept in view under the header */
+.upd-bar { position: sticky; z-index: 19; flex-wrap: wrap; }
+.upd-bar .insp-text { flex-basis: 100%; white-space: normal; font-weight: 700; }
+.upd-bar #updBtn { margin-left: auto; }
 .insp-msg { color: var(--danger); min-height: 1.2em; margin-top: 4px; }
 .insp-msg:empty { min-height: 0; margin-top: 0; } /* only takes room when there is a message (Start inspection has 4 job fields) */
 /* ---------- operator ---------- */

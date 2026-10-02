@@ -1704,6 +1704,111 @@ async function init() {
   askPersist();
   route();
   Sync.init().catch((e) => console.warn('sync init', e));
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
+  Upd.init();
 }
+
+/* ================= app updates ("A new version of the app is ready") ================= */
+// sw.js installs a new version in the background (bypassing the HTTP cache) and takes over right away (skipWaiting +
+// clients.claim), but a page that is already open keeps running the code it loaded. So the app checks for a new
+// version at launch and whenever it comes back to the foreground (at most once a minute), asks the service worker
+// which version it has, and if that is newer than this page shows a banner under the header. It never reloads by
+// itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
+// while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
+// input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
+const APP_VERSION = 'hbp-v14'; // keep equal to VERSION in sw.js (the test suite checks)
+const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
+// What would an update interrupt right now? '' = nothing.
+function unsavedWork() {
+  if ($('#modalRoot').innerHTML) return 'sheet';
+  const v = location.hash.replace(/^#\/?/, '').split('/')[0];
+  if (v === 'add' && S.queue.length > S.qIndex) return 'photo';
+  if (v === 'edit') return 'edit';
+  if (S.inspection) return 'inspection';
+  return '';
+}
+const UPD_ASK = {
+  photo: { title: 'You have an unsaved photo. Save it first, or update anyway?', cancel: 'Save it first' },
+  edit: { title: 'You have unsaved photo changes. Save them first, or update anyway?', cancel: 'Save them first' },
+  inspection: { title: 'An inspection is in progress. Finish it first, or update anyway?', cancel: 'Keep inspecting',
+    msg: 'Photos you already saved are kept either way. After the update, tap Start inspection again.' },
+};
+const Upd = {
+  reg: null, ready: '', dismissed: false, lastCheck: 0, minGap: 60000, checks: 0, sawControllerChange: false,
+  early() { // as soon as the script runs, so a takeover during startup isn't missed
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { this.sawControllerChange = true; this.evaluate(false); }); // prompt, never reload
+  },
+  init() {
+    if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
+    navigator.serviceWorker.register('sw.js').then((reg) => {
+      this.reg = reg;
+      reg.addEventListener('updatefound', () => this.watch(reg.installing));
+      this.watch(reg.installing);
+      this.check(true);
+    }).catch((e) => console.warn('SW registration failed', e));
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') this.check(); });
+    window.addEventListener('pageshow', (e) => { if (e.persisted) this.check(); });
+    window.addEventListener('resize', () => this.place());
+  },
+  watch(w) { if (w) w.addEventListener('statechange', () => { if (w.state === 'installed' || w.state === 'activated') this.evaluate(false); }); },
+  async check(force) {
+    if (!this.reg || (!force && Date.now() - this.lastCheck < this.minGap)) return;
+    this.lastCheck = Date.now(); this.checks++;
+    try { await this.reg.update(); } catch (e) { /* offline: next time */ }
+    await this.evaluate(true);
+  },
+  // The version of a service worker (workers older than hbp-v14 don't answer: '').
+  swVersion(w) {
+    return new Promise((resolve) => {
+      if (!w || typeof MessageChannel === 'undefined') return resolve('');
+      const ch = new MessageChannel(), t = setTimeout(() => resolve(''), 3000);
+      ch.port1.onmessage = (e) => { clearTimeout(t); resolve((e.data && e.data.version) || ''); };
+      try { w.postMessage({ type: 'version' }, [ch.port2]); } catch (e) { clearTimeout(t); resolve(''); }
+    });
+  },
+  // A finished (installed or active) newer version = ready. A check shows the banner again even after "Not now".
+  async evaluate(fromCheck) {
+    const r = this.reg || await navigator.serviceWorker.getRegistration().catch(() => null);
+    if (!r) return;
+    const v = await this.swVersion(r.waiting || r.active);
+    if (verNum(v) <= verNum(APP_VERSION)) return;
+    this.ready = v;
+    if (fromCheck || !this.dismissed) { this.dismissed = false; this.show(); }
+  },
+  bar() {
+    let b = $('#updBar');
+    if (b) return b;
+    b = document.createElement('div');
+    b.id = 'updBar'; b.className = 'insp-bar upd-bar'; b.setAttribute('role', 'status'); b.hidden = true;
+    b.innerHTML = `<span class="insp-text" id="updText">A new version of the app is ready. Tap to update.</span>
+      <button type="button" class="btn primary insp-done" id="updBtn">Update</button>
+      <button type="button" class="btn ghost insp-done" id="updLater">Not now</button>`;
+    $('#topbar').after(b);
+    $('#updBtn').onclick = () => this.apply();
+    $('#updLater').onclick = () => this.dismiss();
+    return b;
+  },
+  show() { this.bar().hidden = false; this.place(); },
+  place() { const b = $('#updBar'); if (b && !b.hidden) b.style.top = $('#topbar').offsetHeight + 'px'; },
+  dismiss() { this.dismissed = true; const b = $('#updBar'); if (b) b.hidden = true; },
+  async apply() {
+    const what = unsavedWork();
+    if (what === 'sheet') return; // a sheet is open (its backdrop covers the banner): never drop what was typed
+    if (what) {
+      const a = UPD_ASK[what];
+      if (!(await confirmBox({ title: a.title, msg: a.msg ? esc(a.msg) : '', ok: 'Update anyway', cancel: a.cancel }))) return;
+    }
+    const btn = $('#updBtn'); if (btn) btn.disabled = true;
+    try { await outboxCount(); } catch (e) { /* */ } // waits for any just-queued sync entry to finish writing; IndexedDB keeps it across the reload
+    const r = this.reg;
+    if (r && r.waiting) { // normally the new version has already taken over; if it's still waiting, let it in first
+      navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), { once: true });
+      r.waiting.postMessage({ type: 'skipWaiting' });
+      setTimeout(() => location.reload(), 3000);
+      return;
+    }
+    location.reload();
+  },
+};
+Upd.early();
 init();

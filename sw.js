@@ -1,6 +1,6 @@
 /* Hardband Photos service worker: caches the app shell so the app opens offline.
    Bump VERSION whenever app files change so phones pick up the new copy. */
-const VERSION = 'hbp-v13';
+const VERSION = 'hbp-v14';
 const SHELL = [
   './',
   './index.html',
@@ -17,8 +17,18 @@ const SHELL = [
   './icons/favicon-32.png'
 ];
 
+// cache: 'reload' = straight from the server, never from the browser's HTTP cache (GitHub Pages lets files be cached
+// for 10 minutes, which could otherwise put an older app.js into a new version's cache).
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
+});
+
+// The page asks which version this is (to offer "A new version of the app is ready"); skipWaiting is only sent
+// after the user tapped Update, in case this version is still waiting.
+self.addEventListener('message', (e) => {
+  const d = e.data || {};
+  if (d.type === 'version' && e.ports && e.ports[0]) e.ports[0].postMessage({ version: VERSION });
+  if (d.type === 'skipWaiting') self.skipWaiting();
 });
 
 self.addEventListener('activate', (e) => {
