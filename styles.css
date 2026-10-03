@@ -77,6 +77,10 @@ body.with-insp-btn { padding-bottom: calc(170px + var(--safe-b)); }
 .upd-bar .insp-text { flex-basis: 100%; white-space: normal; font-weight: 700; }
 .upd-bar #updBtn { margin-left: auto; }
 .insp-msg { color: var(--danger); min-height: 1.2em; margin-top: 4px; }
+/* tap-to-pick suggestions under a text field (instead of a datalist): same look as the condition chips */
+.pick-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.pick-list button { min-height: 44px; padding: 0 14px; border-radius: 22px; border: 2px solid var(--line); background: #fff; font: inherit; font-size: 16px; cursor: pointer; }
+.pick-list button:active { background: #ffe9d6; }
 .insp-msg:empty { min-height: 0; margin-top: 0; } /* only takes room when there is a message (Start inspection has 4 job fields) */
 /* ---------- operator ---------- */
 .op-chip { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 52px; margin: 10px 0 0; padding: 6px 14px;

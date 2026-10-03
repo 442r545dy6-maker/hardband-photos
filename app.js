@@ -343,6 +343,26 @@ async function processFile(file) {
 
 /* ================= UI plumbing ================= */
 const view = $('#view');
+// Tap-to-pick suggestions under a text field: plain buttons, used instead of <datalist> (iOS home-screen web apps
+// crashed with datalist fields). On focus: the most recent ones; while typing: the ones containing the text. Only the
+// small button list is redrawn; the input itself is never replaced, and nothing calls focus() from blur.
+function attachPickList(input, box, names) {
+  const norm = (x) => String(x || '').trim().toLowerCase();
+  const fill = () => {
+    const q = norm(input.value);
+    const hits = names.filter((n) => norm(n) !== q && (!q || norm(n).includes(q))).slice(0, 8);
+    box.innerHTML = hits.map((n) => `<button type="button" data-pick="${esc(n)}">${esc(n)}</button>`).join('');
+    box.hidden = !hits.length;
+  };
+  input.addEventListener('focus', fill);
+  input.addEventListener('input', fill);
+  input.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== input) box.hidden = true; }, 250));
+  box.addEventListener('mousedown', (e) => e.preventDefault()); // tapping a suggestion doesn't move the focus
+  box.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-pick]'); if (!b) return;
+    input.value = b.dataset.pick; box.hidden = true; input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+}
 function setChrome({ title, back = null, bottom = true, insp = false }) {
   $('#inspBtn').hidden = !insp;
   document.body.classList.toggle('with-insp-btn', !!(bottom && insp));
@@ -511,6 +531,7 @@ async function removePhoto(p) {
 }
 // Re-draw the current screen after a background sync, unless the user is in the middle of something.
 function softRefresh() {
+  ensurePipeSpecs().catch((e) => console.warn('pipe specs', e)); // team sync may have brought in specs to map / rename
   const h = location.hash;
   const ae = document.activeElement;
   if ($('#modalRoot').innerHTML || /^#\/(add|edit|saved)/.test(h) || (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))) { S.staleView = true; return; }
@@ -554,7 +575,7 @@ const hasSearch = () => { const s = S.search; return !!(s.q.trim() || s.customer
 const filterCount = () => { const s = S.search; return [s.op, s.customerId, s.rigId, s.end, s.stage, s.from, s.to].filter(Boolean).length; };
 function haystack(p) {
   return [labelOf('customers', p.customerId), labelOf('rigs', p.rigId), (S.rigs.get(p.rigId) || {}).notes, labelOf('pipeSpecs', p.pipeSpecId),
-    p.serialNumber, p.end, p.bandNumber ? 'B' + p.bandNumber : '', p.notes, isoDay(p.createdAt), STAGES[stageOf(p)].words, cleanOp(p.operator), p.workOrder || ''].join(' \u0001 ').toLowerCase();
+    p.serialNumber, p.end, p.bandNumber ? 'B' + p.bandNumber : '', p.notes, isoDay(p.createdAt), STAGES[stageOf(p)].words, cleanOp(p.operator)].join(' \u0001 ').toLowerCase();
 }
 function searchPhotos() {
   const s = S.search;
@@ -736,13 +757,11 @@ function renderFolder(ck, rk) {
   setChrome({ title: `${labelOf('customers', ck) || 'No customer'} / ${rig ? rig.name : 'No rig'}`, back: '#/', bottom: true });
   const groups = jointGroups(list);
   S.lastList = groups.flatMap((g) => g.ps.map((p) => p.id));
-  const wos = [...new Set(list.slice().sort((a, b) => b.createdAt - a.createdAt).map((p) => p.workOrder).filter(Boolean))];
   view.innerHTML = `
     <div class="card">
       <div class="muted small">${esc(labelOf('customers', ck) || 'No customer')}</div>
       <div style="font-size:22px;font-weight:800" id="folderRigName">${esc(rig ? rig.name : 'No rig')}</div>
       ${rig && rig.notes ? `<div class="muted small" style="margin-top:4px">${esc(rig.notes)}</div>` : ''}
-      ${wos.length ? `<div class="muted small" style="margin-top:4px" id="folderWo">Work order # ${wos.map(esc).join(', ')}</div>` : ''}
       <div class="muted small" style="margin-top:6px">${list.length} photo${list.length === 1 ? '' : 's'} · ${groups.length} joint${groups.length === 1 ? '' : 's'}${list.length ? ` <span id="folderStages">(${list.filter((p) => stageOf(p) === 'pre').length} before · ${list.filter((p) => stageOf(p) === 'post').length} after)</span>` : ''}. New photos taken here go in this folder.</div>
       ${rig ? `<button class="btn ghost block" id="editRigBtn" style="margin-top:10px">✎ Rename / edit rig</button>` : ''}
     </div>
@@ -774,7 +793,6 @@ function renderPhoto(id) {
       <dl class="kv" id="detailFields">
         <dt>Stage</dt><dd id="detailStage">${stageBadge(p)} ${esc(STAGES[stageOf(p)].label)}</dd>
         <dt>Operator</dt><dd id="detailOp">${opLinkHTML(p)}</dd>
-        <dt>Work order #</dt><dd id="detailWo">${esc(p.workOrder || '—')}</dd>
         <dt>Customer</dt><dd>${esc(labelOf('customers', p.customerId) || '—')}</dd>
         <dt>Rig</dt><dd>${esc(rig.name || '—')}${rig.notes ? `<div class="muted small">${esc(rig.notes)}</div>` : ''}</dd>
         <dt>Pipe spec</dt><dd>${esc(labelOf('pipeSpecs', p.pipeSpecId) || '—')}</dd>
@@ -995,8 +1013,8 @@ function renderForm(mode, id) {
       ${opFieldHTML('fOperator', vals.operator, { wrapId: 'fldOperator', blank: 'No operator' })}
       <div class="field" id="fldSpec"><label for="fSpec">Pipe spec</label>${selectHTML('pipeSpecs', 'pipeSpecId', 'fSpec')}</div>
       <div class="field" id="fldSerial"><label for="fSerial">Serial number</label>
-        <input id="fSerial" type="text" list="snList" value="${esc(vals.serialNumber)}" placeholder="Stamped serial / joint #" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="done">
-        <datalist id="snList">${serials.map((s) => `<option value="${esc(s)}">`).join('')}</datalist></div>
+        <input id="fSerial" type="text" value="${esc(vals.serialNumber)}" placeholder="Stamped serial / joint #" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="done">
+        <div class="pick-list" id="snPick" hidden></div></div>
       <div class="field" id="fldPreChips" hidden><span class="lbl">Condition before hardband</span><div id="preChipSlot"></div>
         <div class="muted small notes-peek" id="notesPeek" hidden></div></div>
       <div class="field" id="fldEnd"><span class="lbl">End</span><div class="seg" id="fEnd">
@@ -1026,6 +1044,7 @@ function renderForm(mode, id) {
   const peekNotes = () => { const pk = $('#notesPeek'), v = $('#fNotes').value.trim(); pk.hidden = stage !== 'pre' || !v || $('#moreBox').open; pk.textContent = v ? 'Notes: ' + v : ''; };
   const drawHead = () => { $('#preHead').innerHTML = `<span class="pre-head-rig">📁 ${esc(labelOf('rigs', $('#fRig').value) || 'No rig')}</span> · ${stageBadge({ stage: 'pre' })} <b>Before hardband</b> <span class="pre-head-op" id="preHeadOp">· 👷 ${esc(opText({ operator: opCtl.value }))}</span>`; };
   const opCtl = bindOpField('fOperator', { onChange: () => { if (stage === 'pre') drawHead(); } });
+  attachPickList($('#fSerial'), $('#snPick'), serials);
   const drawStage = () => {
     $$('#fStage button').forEach((b) => { const on = b.dataset.v === stage; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
     const ch = $('#fChips'); ch.dataset.stage = stage;
@@ -1134,6 +1153,7 @@ async function saveQueued(v) {
   markDirty('photos', p.id);
   S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, stage: v.stage, operator: v.operator };
   if (v.operator) { rememberOperator(v.operator, true); if (S.addInspect && S.inspection) { S.inspection.operator = v.operator; drawInspBar(); } } // next photo: same operator
+  if (S.addInspect && S.inspection) { Object.assign(S.inspection, { rigId: v.rigId || '', customerId: v.customerId || '', pipeSpecId: v.pipeSpecId || '' }); drawInspBar(); } // next photo: what was just saved
   S.savedCount++;
   if (S.addInspect && S.inspection) S.inspection.count++;
   await setMeta('lastUsed', { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId });
@@ -1191,96 +1211,130 @@ async function handleFiles(fileList) {
 }
 
 /* ================= inspection session (Start inspection) ================= */
-// Job details first, in this order: Work order #, Rig, Customer, Pipe size (= the pipe spec list). All four are
-// required before the camera opens; each is typed or picked from suggestions, and a name that isn't in the list yet
-// is added on the spot (a case-insensitive match reuses the existing entry), so nothing can block a job in the field.
-// Customer and pipe size start with the last-used ones; the work order starts blank (it changes with every job) and
-// suggests recent ones. The operator picker is unchanged. "Open camera" is a <label for="camInput">, so the camera
-// opens inside the same tap (iOS only opens a file/camera picker from a direct user tap). The rig / customer / pipe
-// size are looked up / created in the background; handleFiles waits for them before building the form.
-const normRig = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
-const cleanName = (s) => String(s || '').trim().replace(/\s+/g, ' ');
-const findLookup = (kind, name) => sortedItems(kind).find((x) => normRig(x[KINDS[kind].field]) === normRig(name));
-// Work orders used lately on this phone (photos and rejects), newest first: suggestions on the Start inspection sheet.
-function recentWorkOrders(n = 8) {
-  const all = [...S.photos.map((p) => [p.workOrder, p.addedAt || p.createdAt || 0]), ...S.rejects.map((r) => [r.workOrder, r.rejectedAt || 0])]
-    .filter((x) => x[0]).sort((a, b) => b[1] - a[1]).map((x) => x[0]);
-  return [...new Set(all)].slice(0, n);
+// 🔍 Start inspection opens a small sheet: Operator (you), Rig name, Customer, Pipe spec, then 📷 Open camera. All are
+// native <select>s (Rig / Customer offer "＋ Add new…" at the top, which reveals a plain text box); no <datalist> anywhere (iOS
+// home-screen apps crashed moving between datalist fields). Rig is required and starts unselected; customer is
+// required and starts with the last-used one; pipe spec is one of the four below. "Open camera" is a
+// <label for="camInput">: the checks run synchronously in its click handler, so the camera opens inside that same tap
+// (iOS only opens a camera picker from a direct tap), and a miss cancels the tap and shows the message instead.
+// No work order any more (new photos carry none; photos that already have one keep it in the data, CSV and sync).
+const INSP_SPECS = [ // the Start inspection drop-down: exactly these, in this order
+  { id: 'spec_45_duo', name: '4.5 Duo', key: '4.5duo' },
+  { id: 'spec_45_tsds', name: '4.5 TSDS', key: '4.5tsds' },
+  { id: 'spec_5_ptech_r3', name: '5" P-Tech R3', key: '5ptechr3', drop47: true }, // = the old 5" P-Tech 47 R3 entry
+  { id: 'spec_5_nc50', name: '5" NC50', key: '5nc50' },
+];
+const INSP_SPEC_DEFAULT = 'spec_5_ptech_r3';
+// Same spec name? Ignores case, spaces, punctuation and quote style (" ” ″), reads 4-1/2 as 4.5; for P-Tech R3 also "47".
+const specNorm = (s, drop47) => { let k = String(s || '').toLowerCase().replace(/4\s*-?\s*1\s*\/\s*2/g, '4.5').replace(/[^a-z0-9.]/g, ''); if (drop47) k = k.replace(/47/g, ''); return k; };
+// The entry a spec maps onto: an existing (older) entry with the same name wins, so old photos keep their link;
+// otherwise the one with the fixed id. Same rule on every phone, so they all agree.
+function specEntries(sp) {
+  const hits = [...S.pipeSpecs.values()].filter((x) => specNorm(x.description, sp.drop47) === sp.key);
+  const old = hits.filter((x) => x.id !== sp.id).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { keep: old[0] || hits.find((x) => x.id === sp.id) || null, hits };
+}
+// On load and after each team sync: make sure the four exist (fixed ids: two phones or repeated loads never make
+// duplicates), carry exactly these names (a rename goes through the normal edit + sync path), and fold same-name
+// duplicates into the kept entry (photos move along; team mode keeps a tombstone, nothing is hard-deleted).
+let specEnsuring = null;
+function ensurePipeSpecs() { return specEnsuring || (specEnsuring = ensurePipeSpecsNow().finally(() => { specEnsuring = null; })); }
+async function ensurePipeSpecsNow() {
+  if (!S.pipeSpecs) return;
+  for (const sp of INSP_SPECS) {
+    let { keep, hits } = specEntries(sp);
+    if (!keep) {
+      const g = S.gone.pipeSpecs.get(sp.id);
+      if (g && g.mergedInto && S.pipeSpecs.has(g.mergedInto)) keep = S.pipeSpecs.get(g.mergedInto);
+      else {
+        keep = { id: sp.id, description: sp.name, updatedAt: Date.now() };
+        await db.put('pipeSpecs', keep); S.pipeSpecs.set(keep.id, keep); S.gone.pipeSpecs.delete(sp.id); markDirty('pipeSpecs', keep.id);
+      }
+    }
+    if (keep.description !== sp.name) {
+      const upd = { ...keep, description: sp.name, updatedAt: Date.now() };
+      await db.put('pipeSpecs', upd); S.pipeSpecs.set(upd.id, upd); markDirty('pipeSpecs', upd.id); keep = upd;
+    }
+    for (const x of hits) if (x.id !== keep.id && S.pipeSpecs.has(x.id)) await mergeLookup('pipeSpecs', x.id, keep.id);
+  }
+}
+const inspSpecOptions = () => INSP_SPECS.map((sp) => specEntries(sp).keep).filter(Boolean);
+// Rig / Customer: a native <select>: placeholder, then "＋ Add new rig…" / "＋ Add new customer…" at the top, then the
+// existing entries. Choosing Add new reveals a plain text box right there (no datalist). Rig starts unselected every time (a new job is often a new rig); customer starts with
+// the last-used one. A typed name that already exists (any capitalisation / spacing) reuses that entry.
+const normName2 = (x) => String(x || '').trim().replace(/\s+/g, ' ').toLowerCase();
+const cleanName = (x) => String(x || '').trim().replace(/\s+/g, ' ');
+const findLookup = (kind, name) => sortedItems(kind).find((x) => normName2(x[KINDS[kind].field]) === normName2(name));
+function pickNewHTML(id, kind, sel, blank, label, newLabel, ph) {
+  return `<div class="field"><label for="${id}">${esc(label)}</label>
+    <select id="${id}"><option value="" ${sel ? '' : 'selected'}>${esc(blank)}</option><option value="__new">${esc(newLabel)}</option>${opts(kind, sel)}</select>
+    <input id="${id}New" type="text" maxlength="80" placeholder="${esc(ph)}" autocapitalize="words" autocorrect="off" spellcheck="false" autocomplete="off" enterkeyhint="done" hidden>
+    <div class="small insp-msg" id="${id}Msg" role="alert"></div></div>`;
 }
 function startInspectionSheet() {
+  const list = inspSpecOptions();
   const lu = S.meta.lastUsed || {};
-  const listOf = (kind) => sortedItems(kind).map((x) => `<option value="${esc(x[KINDS[kind].field])}">`).join('');
+  const def = (list.find((x) => x.id === lu.pipeSpecId) || list.find((x) => x.id === (specEntries(INSP_SPECS[2]).keep || {}).id) || list[0] || {}).id || '';
+  const custDef = S.customers.has(lu.customerId) ? lu.customerId : '';
   const m = openModal(`<h3>Start inspection</h3>
     <form id="inspForm" autocomplete="off">
       ${opFieldHTML('inspOp', currentOperator(), { wrapId: 'inspOpField', label: 'Operator (you)' })}
-      <div class="field"><label for="inspWo">Work order #</label>
-        <input id="inspWo" type="text" list="inspWoList" maxlength="60" placeholder="Type or pick the work order #" autocorrect="off" spellcheck="false" enterkeyhint="next">
-        <datalist id="inspWoList">${recentWorkOrders().map((w) => `<option value="${esc(w)}">`).join('')}</datalist>
-        <div class="small insp-msg" id="inspWoMsg" role="alert"></div></div>
-      <div class="field"><label for="inspRigName">Rig name</label>
-        <input id="inspRigName" type="text" list="inspRigList" placeholder="Type or pick a rig" autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="next">
-        <datalist id="inspRigList">${listOf('rigs')}</datalist>
-        <div class="small insp-msg" id="inspMsg" role="alert"></div></div>
-      <div class="field"><label for="inspCustName">Customer</label>
-        <input id="inspCustName" type="text" list="inspCustList" value="${esc(S.customers.has(lu.customerId) ? labelOf('customers', lu.customerId) : '')}" placeholder="Type or pick a customer" autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="next">
-        <datalist id="inspCustList">${listOf('customers')}</datalist>
-        <div class="small insp-msg" id="inspCustMsg" role="alert"></div></div>
-      <div class="field"><label for="inspSpecName">Pipe size <span class="muted small">(pipe spec)</span></label>
-        <input id="inspSpecName" type="text" list="inspSpecList" value="${esc(S.pipeSpecs.has(lu.pipeSpecId) ? labelOf('pipeSpecs', lu.pipeSpecId) : '')}" placeholder="Type or pick, e.g. 4-1/2&quot; Range 3, 450 Duo" autocorrect="off" spellcheck="false" enterkeyhint="go">
-        <datalist id="inspSpecList">${listOf('pipeSpecs')}</datalist>
-        <div class="small insp-msg" id="inspSpecMsg" role="alert"></div></div>
+      ${pickNewHTML('inspRigPick', 'rigs', '', '— Pick the rig —', 'Rig name', '＋ Add new rig…', 'Type the new rig name')}
+      ${pickNewHTML('inspCustPick', 'customers', custDef, '— Pick the customer —', 'Customer', '＋ Add new customer…', 'Type the new customer name')}
+      <div class="field"><label for="inspSpec">Pipe spec</label>
+        <select id="inspSpec">${list.length ? list.map((x) => `<option value="${esc(x.id)}" ${x.id === def ? 'selected' : ''}>${esc(x.description)}</option>`).join('') : '<option value="">No pipe spec</option>'}</select></div>
       <div class="stack form-actions">
         <label for="camInput" class="btn primary big block" id="inspCamBtn">📷 Open camera</label>
         <button type="button" class="btn ghost block" id="inspCancel">Cancel</button>
       </div>
     </form>`);
-  const inp = $('#inspRigName', m);
-  // The job details, in order, with the message shown when one is missing.
-  const need = [['#inspWo', '#inspWoMsg', 'Type the work order # first.'], ['#inspRigName', '#inspMsg', 'Type the rig name first.'],
-    ['#inspCustName', '#inspCustMsg', 'Type or pick the customer first.'], ['#inspSpecName', '#inspSpecMsg', 'Type or pick the pipe size first.']]
-    .map(([f, msg, text]) => ({ el: $(f, m), msg: $(msg, m), text }));
-  const firstEmpty = () => need.find((n) => !cleanName(n.el.value));
   const opCtl = bindOpField('inspOp', { onChange: (l) => { if (l) rememberOperator(l, true); } });
-  setTimeout(() => (firstEmpty() || need[0]).el.focus(), 50);
-  const begin = (e) => {
-    const miss = firstEmpty();
-    if (miss) { if (e) e.preventDefault(); miss.msg.textContent = miss.text; miss.el.focus(); return false; }
-    const op = opCtl.adding ? opCtl.commit() : opCtl.value;
-    if (!op) { if (e) e.preventDefault(); if (!opCtl.adding) opCtl.say('Pick your name first (or ＋ Add new operator).'); return false; }
-    rememberOperator(op, true);
-    const [wo, rig, cust, spec] = need.map((n) => cleanName(n.el.value));
-    beginInspection({ workOrder: wo, rigName: rig, customerName: cust, specName: spec, operator: op });
-    setTimeout(() => closeModal(true), 0); // after the tap has opened the camera
-    return true;
+  // Rig / Customer: what's chosen ({ id } or { name } for a new one), or null with the message to show.
+  const pick = (id, what) => {
+    const sel = $('#' + id, m), box = $('#' + id + 'New', m), msg = $('#' + id + 'Msg', m);
+    if (sel.value === '__new') {
+      const name = cleanName(box.value);
+      if (!name) return { msg, el: box, text: `Type the new ${what} name first.` };
+      return { name };
+    }
+    if (!sel.value) return { msg, el: sel, text: `Pick the ${what} first.` };
+    return { id: sel.value };
   };
-  $('#inspCamBtn', m).addEventListener('click', begin);
+  for (const id of ['inspRigPick', 'inspCustPick']) {
+    const sel = $('#' + id, m), box = $('#' + id + 'New', m), msg = $('#' + id + 'Msg', m);
+    sel.addEventListener('change', () => { msg.textContent = ''; box.hidden = sel.value !== '__new'; if (!box.hidden) box.focus(); });
+    box.addEventListener('input', () => { msg.textContent = ''; });
+    box.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); box.blur(); } }); // keyboard closes; Open camera needs its own tap
+  }
+  // Everything here is synchronous: on a miss the tap is cancelled (preventDefault, message shown, nothing opens);
+  // otherwise the label's own default action opens the camera in this same tap. New entries are saved afterwards.
+  $('#inspCamBtn', m).addEventListener('click', (e) => {
+    for (const x of [$('#inspRigPickMsg', m), $('#inspCustPickMsg', m)]) x.textContent = '';
+    const op = opCtl.adding ? opCtl.commit() : opCtl.value;
+    if (!op) { e.preventDefault(); if (!opCtl.adding) opCtl.say('Pick your name first (or ＋ Add new operator).'); return; }
+    const rig = pick('inspRigPick', 'rig'), cust = pick('inspCustPick', 'customer');
+    const miss = [rig, cust].find((x) => x.msg);
+    if (miss) { e.preventDefault(); miss.msg.textContent = miss.text; miss.el.focus(); return; }
+    rememberOperator(op, true);
+    startInspection({ rig, cust, pipeSpecId: $('#inspSpec', m).value, operator: op });
+    setTimeout(() => closeModal(true), 0); // after the tap has opened the camera
+  });
   $('#inspCancel', m).onclick = () => closeModal(true);
-  for (const n of need) n.el.addEventListener('input', () => { n.msg.textContent = ''; });
-  // Next / Go / Enter on the keyboard: on to the next empty job field; with all four filled in, the keyboard closes
-  // so the big Open camera button is in view (the camera itself needs that tap on iOS).
-  need.forEach((n, i) => n.el.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    const nxt = need.slice(i + 1).find((x) => !cleanName(x.el.value)) || firstEmpty();
-    if (nxt) nxt.el.focus(); else n.el.blur();
-  }));
-  $('#inspForm', m).onsubmit = (e) => { e.preventDefault(); if (begin(null)) $('#camInput').click(); };
+  $('#inspForm', m).onsubmit = (e) => e.preventDefault();
 }
-function beginInspection({ workOrder, rigName, customerName, specName, operator }) {
-  const sess = { workOrder: cleanName(workOrder), rigName, rigId: null, customerId: '', pipeSpecId: '', count: 0, operator: cleanOp(operator) };
+function startInspection({ rig, cust, pipeSpecId, operator }) {
+  S.keepJoint = false;
+  const sess = { workOrder: '', rigName: rig.name || labelOf('rigs', rig.id), rigId: rig.id || null, customerId: cust.id || '', pipeSpecId: S.pipeSpecs.has(pipeSpecId) ? pipeSpecId : '',
+    count: 0, operator: cleanOp(operator || '') };
   S.inspection = sess;
-  sess.ready = (async () => {
-    // same name in any capitalisation / spacing = the existing entry; otherwise it's added (and synced) like any other
-    const cust = customerName ? (findLookup('customers', customerName) || await createLookup('customers', { name: customerName })) : null;
-    const spec = specName ? (findLookup('pipeSpecs', specName) || await createLookup('pipeSpecs', { description: specName })) : null;
-    const rig = findLookup('rigs', rigName) || await createLookup('rigs', { name: rigName });
-    sess.customerId = cust ? cust.id : ''; sess.pipeSpecId = spec ? spec.id : '';
-    sess.rigId = rig.id; sess.rigName = rig.name;
-    await setMeta('lastUsed', { ...(S.meta.lastUsed || {}), customerId: sess.customerId, rigId: rig.id, pipeSpecId: sess.pipeSpecId }); // next sheet / photo starts with these
-    if (S.inspection === sess) { location.hash = `#/folder/${encodeURIComponent(sess.customerId)}/${encodeURIComponent(rig.id)}`; drawInspBar(); }
-    return rig;
-  })();
   drawInspBar();
+  sess.ready = (async () => { // new rig / customer: looked up (any capitalisation) or added, after the camera has opened
+    if (!sess.customerId && cust.name) sess.customerId = (findLookup('customers', cust.name) || await createLookup('customers', { name: cust.name })).id;
+    if (!sess.rigId) { const r = findLookup('rigs', rig.name) || await createLookup('rigs', { name: rig.name }); sess.rigId = r.id; sess.rigName = r.name; }
+    await setMeta('lastUsed', { ...(S.meta.lastUsed || {}), customerId: sess.customerId, rigId: sess.rigId, pipeSpecId: sess.pipeSpecId });
+    if (S.inspection === sess) { location.hash = `#/folder/${encodeURIComponent(sess.customerId)}/${encodeURIComponent(sess.rigId)}`; drawInspBar(); }
+    return sess.rigId;
+  })();
 }
 function endInspection() { S.inspection = null; S.addInspect = false; drawInspBar(); }
 function finishInspection() {
@@ -1294,8 +1348,8 @@ function drawInspBar(v) {
   if (v === undefined) v = location.hash.replace(/^#\/?/, '').split('/')[0];
   bar.hidden = !sess;
   if (!sess) return;
-  $('#inspRig').textContent = (sess.rigId && labelOf('rigs', sess.rigId)) || sess.rigName;
-  $('#inspBarOp').textContent = (sess.workOrder ? ` · WO ${sess.workOrder}` : '') + (sess.operator ? ` · 👷 ${sess.operator}` : '');
+  $('#inspRig').textContent = (sess.rigId && labelOf('rigs', sess.rigId)) || sess.rigName || 'No rig';
+  $('#inspBarOp').textContent = sess.operator ? ` · 👷 ${sess.operator}` : '';
   $('#inspDone').hidden = v === 'add'; // the photo form has its own Save / Discard
 }
 
@@ -1351,18 +1405,16 @@ async function undoReject(r) {
   toast('Reject removed');
 }
 // One tap on "Log rejected wire" + one tap on "Log reject". The operator is pre-picked from the phone; with none set,
-// the same pick-your-name dropdown (or Add new operator) must be used first. Rig / serial / work order / note are optional.
+// the same pick-your-name dropdown (or Add new operator) must be used first. Rig / serial / note are optional.
 function logRejectSheet() {
   const lu = S.meta.lastUsed || {};
   const rigId = (S.inspection && S.inspection.rigId) || (S.rigs.has(lu.rigId) ? lu.rigId : '');
-  const inspWo = (S.inspection && S.inspection.workOrder) || ''; // during an inspection: that job's work order
   const m = openModal(`<h3>⛔ Log a rejected wire</h3>
     <p class="muted small">Saved with the operator and the time: <b id="rejWhen">${esc(fmtDate(Date.now()))}</b></p>
     ${opFieldHTML('rejOp', currentOperator(), { wrapId: 'rejOpField', label: 'Operator' })}
     <details class="more-box" id="rejMore"><summary>Add details <span class="muted small" id="rejMoreSum"></span></summary>
       <div class="field"><label for="rejRig">Rig</label><select id="rejRig"><option value="">No rig</option>${opts('rigs', rigId)}</select></div>
       <div class="field"><label for="rejSerial">Serial number</label><input id="rejSerial" type="text" placeholder="Stamped serial / joint #" autocapitalize="characters" autocorrect="off" spellcheck="false" autocomplete="off"></div>
-      <div class="field"><label for="rejWo">Work order #</label><input id="rejWo" type="text" maxlength="60" value="${esc(inspWo)}" placeholder="e.g. WO-12345" autocorrect="off" spellcheck="false" autocomplete="off"></div>
       <div class="field"><label for="rejNote">Note</label><input id="rejNote" type="text" maxlength="200" placeholder="e.g. porosity, cracks, bad wire" autocomplete="off"></div>
     </details>
     <div class="stack form-actions">
@@ -1370,10 +1422,9 @@ function logRejectSheet() {
       <button type="button" class="btn ghost block" id="rejCancel">Cancel</button>
     </div>`);
   const ctl = bindOpField('rejOp');
-  const sum = () => { const rn = labelOf('rigs', $('#rejRig', m).value), wo = $('#rejWo', m).value.trim(); $('#rejMoreSum', m).textContent = `rig, serial, work order, note — optional${rn ? ` · Rig: ${rn}` : ''}${wo ? ` · WO: ${wo}` : ''}`; };
+  const sum = () => { const rn = labelOf('rigs', $('#rejRig', m).value); $('#rejMoreSum', m).textContent = `rig, serial, note — optional${rn ? ` · Rig: ${rn}` : ''}`; };
   sum();
   $('#rejRig', m).addEventListener('change', sum);
-  $('#rejWo', m).addEventListener('input', sum);
   $('#rejCancel', m).onclick = () => closeModal(true);
   $('#rejOk', m).onclick = async () => {
     const op = ctl.adding ? ctl.commit() : ctl.value;
@@ -1381,7 +1432,7 @@ function logRejectSheet() {
     $('#rejOk', m).disabled = true;
     rememberOperator(op, true);
     let r;
-    try { r = await logReject({ operator: op, rigId: $('#rejRig', m).value, serialNumber: $('#rejSerial', m).value, workOrder: $('#rejWo', m).value, note: $('#rejNote', m).value }); }
+    try { r = await logReject({ operator: op, rigId: $('#rejRig', m).value, serialNumber: $('#rejSerial', m).value, note: $('#rejNote', m).value }); }
     catch (e) { console.error(e); $('#rejOk', m).disabled = false; toast('Could not save: ' + e.message, 5000); return; }
     closeModal(true);
     redrawAfterReject();
@@ -1425,7 +1476,7 @@ function renderRejects(key) {
       <button type="button" class="op-link" id="rejPhotos" data-op-filter="${esc(key)}">📷 Show photos</button>
     </div>
     <div id="rejItems">${list.map((r) => {
-      const d = [rejectRig(r) ? '📁 ' + esc(rejectRig(r)) : '', r.serialNumber ? 'SN ' + esc(r.serialNumber) : '', r.workOrder ? 'WO ' + esc(r.workOrder) : '', esc(r.note || '')].filter(Boolean).join(' · ');
+      const d = [rejectRig(r) ? '📁 ' + esc(rejectRig(r)) : '', r.serialNumber ? 'SN ' + esc(r.serialNumber) : '', esc(r.note || '')].filter(Boolean).join(' · ');
       return `<div class="list-item rej-item" data-id="${esc(r.id)}"><div class="meta"><b class="rej-when">${esc(fmtDate(r.rejectedAt))}</b>${d ? `<small>${d}</small>` : ''}</div>
         <button type="button" class="btn ghost rej-del" data-del="${esc(r.id)}" aria-label="Delete this reject">🗑 Delete</button></div>`; }).join('')
       || '<div class="empty">No rejects.</div>'}</div>`;
@@ -1696,6 +1747,7 @@ async function init() {
     await openDB();
     await seedIfNeeded();
     await loadAll();
+    await ensurePipeSpecs().catch((e) => console.warn('pipe specs', e));
   } catch (e) {
     console.error(e);
     view.innerHTML = `<div class="card"><b>Storage unavailable.</b><p>${esc(e.message || e)}</p><p class="muted small">Private Browsing can block on-device storage. Open in normal Safari or from the Home Screen icon.</p></div>`;
@@ -1715,7 +1767,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v15'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v16'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {

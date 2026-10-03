@@ -271,6 +271,8 @@ const Sync = {
         await this.push();
         await this.pull();
         if (await this.reconcile()) await this.push();
+        // map / rename the four inspection pipe specs to what the team just brought in, and upload that in this same run
+        if (this.changed && typeof ensurePipeSpecs === 'function') { await ensurePipeSpecs(); if (await outboxCount()) await this.push(); }
       } while (this.again);
       this.lastError = null; this.lastOk = Date.now();
       await setMeta('syncLast', { at: this.lastOk });

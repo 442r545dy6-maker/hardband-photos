@@ -14,7 +14,7 @@ optionally, in a **shared team library** (Supabase), so the whole crew sees the 
   to run on a project that has neither yet
 - `supabase/migrations/005_reject_work_order.sql`: adds `rejects.work_order` (Work order # on a reject; run after 004).
   One line, no quote characters (like 006)
-- `supabase/migrations/006_photo_work_order.sql`: adds `photos.work_order` (Work order # from Start inspection). One
+- `supabase/migrations/006_photo_work_order.sql`: adds `photos.work_order` (Work order # from Start inspection, v13–v15; optional since hbp-v16). One
   line, no quote characters, so it survives iPhone smart quotes
 - `SUPABASE_SETUP.md`: click-by-click setup for a non-developer
 - `manifest.webmanifest`, `sw.js`: installable + offline app shell (bump `VERSION` in sw.js **and** `APP_VERSION` in
@@ -32,18 +32,32 @@ Photos saved before this existed have no stage and count as `post`.
   porosity, Cracks, Needs repair, Eccentric band. Before hardband is a short inspection screen: rig + "Before hardband"
   header, serial number (focused), chips No hardband needed / Reapply / Repair / Eccentric band, and everything else under
   *More details*. Switching stage never clears typed notes (chips only add text to the notes).
-- **🔍 Start inspection** (home screen): the job details come first, in this order, all required before the camera
-  opens: **Work order #** (starts blank, suggests recent ones), **Rig name**, **Customer**, **Pipe size** (the pipe spec
-  list; customer and pipe size start with the last-used ones). Each is typed or picked from suggestions; a
-  case-insensitive match reuses the entry, otherwise it is added on the spot, so a missing customer / pipe size never
-  blocks a job. The *Operator (you)* picker above them is unchanged. A missing field shows a message under it and gets
-  the focus; Next on the keyboard jumps to the next empty one. Every photo of the inspection carries the work order,
-  rig, customer, pipe spec and operator; the work order shows on the photo detail, in the folder card ("Work order #
-  …"), in the Inspecting strip, is searchable, and is prefilled in **⛔ Log rejected wire** opened during the
-  inspection (Rejects screen). **📷 Open camera** is a `<label for="camInput">` (`capture="environment"`), so the camera opens in
-  the same tap. Each photo lands in the Before form for that rig; a blank serial asks "Save without a serial number?"
-  (Add serial / Save anyway); **📷 Next photo** reopens the camera. An "Inspecting: [rig]" strip with **Done** shows
-  until Done is tapped or the user goes back to the home screen.
+- **🔍 Start inspection** (home screen): a sheet with, in this order, **Operator (you)** (the saved-operator picker,
+  required, *＋ Add new operator…* inline), **Rig name**, **Customer** and **Pipe spec**, then **📷 Open camera**. All
+  are native `<select>`s (no `<datalist>` anywhere in the app: iOS home-screen apps crashed on one):
+  - *Rig name*: placeholder *— Pick the rig —*, then **＋ Add new rig…** at the top, then the saved rigs. Starts
+    unselected every time; required.
+  - *Customer*: *— Pick the customer —*, **＋ Add new customer…**, then the saved customers. Starts with the last-used
+    customer; required.
+  - Choosing *＋ Add new…* shows a plain text box right under the select. The name is saved when the camera opens: a
+    case-insensitive / extra-spaces match reuses the existing entry, otherwise a new rig / customer is created and
+    synced like any other. With no rigs / customers yet the select holds only the placeholder and *＋ Add new…*.
+  - *Pipe spec*: exactly **4.5 Duo**, **4.5 TSDS**, **5" P-Tech R3**, **5" NC50** (fixed ids `spec_45_duo`,
+    `spec_45_tsds`, `spec_5_ptech_r3`, `spec_5_nc50`). Default = the last-used spec if it is one of the four, else
+    5" P-Tech R3. On load and after every team sync the app makes sure each exists once: an existing entry with the
+    same name (case, punctuation, quote style ignored; 4-1/2 = 4.5; "P-Tech 47 R3" = "P-Tech R3") is kept and renamed to
+    the exact name (so the old *5" P-Tech 47 R3* keeps its id and its photos), same-name duplicates are merged into it.
+    Other older specs stay on their photos and in the photo form but are not offered here.
+  - **📷 Open camera** is a `<label for="camInput">` (`capture="environment"`), so the camera opens in the same tap; a
+    missing field cancels the tap and shows a message under it (*Pick the rig first.*, *Type the new rig name first.*,
+    *Pick the customer first.*, *Pick your name first…*).
+  Every photo of the inspection carries the rig, customer, pipe spec and operator. Each photo lands in the Before form
+  for that rig (serial numbers used before are offered as tap-to-pick buttons, not a datalist); a blank serial asks
+  "Save without a serial number?" (Add serial / Save anyway); **📷 Next photo** reopens the camera. An
+  "Inspecting: [rig] · [operator]" strip with **Done** shows until Done is tapped or the user goes back home.
+- **Work order #** is no longer asked for or shown anywhere (Start inspection, Log rejected wire, photo detail, folder,
+  strip, reject list, search) since hbp-v16. Work orders already stored (v13–v15) are kept on the records, still
+  sync, and are still in the CSV / JSON export (`work_order` columns) and import.
 - Tiles, the photo detail and the saved screen show a BEFORE / AFTER badge. Search matches "before", "pre",
   "inspection" / "after", "post", and the Filter sheet has a Stage filter.
 - **Compare Before / After**: a photo whose serial (ignoring case and spaces) also has a photo of the other stage gets
@@ -87,11 +101,11 @@ Each rejected wire can be logged in two taps, and the app counts rejects per ope
 - Home screen: **⛔ Log rejected wire** right under the *👷 Operator* chip → a sheet with the operator (pre-picked from
   the phone; with none set, the same pick-your-name dropdown / *＋ Add new operator…* is required first), the time it
   will be saved with, and **⛔ Log reject**. *Add details* (collapsed, optional) = rig (defaults to the last-used rig),
-  serial, **Work order #**, short note. Nothing else is required. A toast *Reject logged — Dusty 104* with **Undo** follows; a line under
+  serial, short note. Nothing else is required. A toast *Reject logged — Dusty 104* with **Undo** follows; a line under
   the button shows *Your rejects today* and links to the per-operator list.
 - **Rejects by operator** (`#/rejects`, also a link under Filter → Operator): one row per operator (same number = same
   operator, case/spaces ignored) with the count and last reject, most rejects first, plus *Unassigned* if any. Tap a
-  name: every reject with its date and time (phone's local time), rig / serial / work order / note, and **🗑 Delete** (asks first),
+  name: every reject with its date and time (phone's local time), rig / serial / note, and **🗑 Delete** (asks first),
   plus *Show photos*. **⤓ Rejects list (CSV for Excel)** shares/downloads all rejects.
 - Filter → Operator options read e.g. *Dusty 104 — 12 photos, 3 rejects* (operators with only rejects are listed too);
   with an operator selected, the results show *⛔ 3 rejects logged ›*.
@@ -102,7 +116,7 @@ Each rejected wire can be logged in two taps, and the app counts rejects per ope
   DELETE). Rejects go through the outbox like photos (offline → queued). If the table doesn't exist yet (PostgREST
   `404 PGRST205`, or `42P01` / `42501`), the phone keeps them in `meta.rejectBacklog`, the pill still shows ✓ Synced,
   and it re-checks at most every 5 minutes, then uploads them (last-write-wins by `client_updated_at`).
-- Work order # (`workOrder` on the record, column `rejects.work_order`, `supabase/migrations/005_reject_work_order.sql`).
+- Work order # (no longer entered since hbp-v16; older values kept) (`workOrder` on the record, column `rejects.work_order`, `supabase/migrations/005_reject_work_order.sql`).
   Until 005 is run, rejects upload without it (PGRST204 / 42703 detection, like `photos.operator`), each phone keeps
   its work orders (`meta.workOrderBacklog`, pill stays ✓ Synced) and fills them in on the server (work_order-only PATCH
   where still empty) once the column exists; pulling rows without the column never clears a local work order.
@@ -151,7 +165,9 @@ team project.
   a server without the `stage` column (then migrated), a phone still on the old version editing a Before photo,
   the operator column, the reject log (no table → kept on the phone → migrated → second phone, undo/delete, offline),
   the reject work order column (no column → kept on the phone → 005 run → filled in, second phone), and the photo
-  work order from Start inspection (same, for 006).
+  work order from Start inspection (same, for 006),
+  and the four inspection pipe specs against a team that already has the old *5" P-Tech 47 R3* (renamed in place,
+  no duplicates on either phone).
 
 ## Hosting
 Any static HTTPS host works (service workers and install need HTTPS; `localhost` also works for testing).
