@@ -20,7 +20,8 @@ optionally, in a **shared team library** (Supabase), so the whole crew sees the 
 - `manifest.webmanifest`, `sw.js`: installable + offline app shell (bump `VERSION` in sw.js **and** `APP_VERSION` in
   app.js, to the same value, when files change; the test suite checks they match)
 - `vendor/jszip.min.js`: JSZip 3.10.1 (bundled locally for offline ZIP export/import)
-- `icons/`: PNG icons (regenerate with `python3 make_icons.py`)
+- `icons/`: PNG icons made from Dusty's photo of a hardbanded tool joint (`icons/source.jpg`, the approved 1024 px square
+  crop). Regenerate with `python3 make_icons.py` (`--from new-crop.png` replaces the source first), then bump both versions
 - `screenshots/`: mobile screenshots from the automated test
 
 ## Before / After hardband stage

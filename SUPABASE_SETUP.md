@@ -63,7 +63,10 @@ If your project was created with an older `setup.sql`, add the new **stage** col
 
 Phones keep syncing even before you run it; photos marked *Before hardband* get their stage uploaded afterwards.
 
-### ▶ To do now: Operator column + Reject log — ONE file, run it once
+### ✅ Already done: Operator column + Reject log (004) — no need to paste it again
+You already ran this on the team project, so there's nothing to do here. The steps below are kept only for setting up a
+**different** project from an older `setup.sql`.
+
 This single file covers **both** pending updates: the Operator column on photos (same as `003_operator.sql`) and the new
 **rejects** table for the reject log (`004_rejects.sql`). You do **not** need to run `003_operator.sql` separately
 (running it as well is harmless).
@@ -83,7 +86,7 @@ with the same security as photos: only the signed-in crew can see or add rejects
 Phones keep working before you run it: operators and rejects stay on each phone and upload by themselves within a few
 minutes after it's run. Until then, other phones don't see who took a photo, and each phone only counts its own rejects.
 
-### ▶ Then: Work order # on rejects — run it once (after the file above)
+### ▶ Then: Work order # on rejects — run it once (after 004)
 1. **SQL Editor** → new, empty query.
 2. Paste this single line and click **Run** (it has no quote marks, so iPhone "smart quotes" can't break it):
 
