@@ -990,7 +990,7 @@ function renderForm(mode, id) {
     if (S.addKeep && S.lastSaved) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '', stage: stageOf(S.lastSaved) });
     if (S.batchValues) Object.assign(vals, { ...S.batchValues, bandNumber: '', notes: '' });
     if (S.addInspect) vals.stage = 'pre'; // inspection session: every new photo starts as Before hardband
-    if (S.addInspect && S.inspection && S.inspection.serialNumber) vals.serialNumber = S.inspection.serialNumber;
+    if (S.addInspect && S.addKeep && S.inspection && S.inspection.serialNumber) vals.serialNumber = S.inspection.serialNumber;
     if (S.addInspect && S.inspection && S.inspection.operator) vals.operator = S.inspection.operator;
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
   }
@@ -1769,7 +1769,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v17'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v18'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
