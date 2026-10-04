@@ -990,6 +990,7 @@ function renderForm(mode, id) {
     if (S.addKeep && S.lastSaved) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '', stage: stageOf(S.lastSaved) });
     if (S.batchValues) Object.assign(vals, { ...S.batchValues, bandNumber: '', notes: '' });
     if (S.addInspect) vals.stage = 'pre'; // inspection session: every new photo starts as Before hardband
+    if (S.addInspect && S.inspection && S.inspection.serialNumber) vals.serialNumber = S.inspection.serialNumber;
     if (S.addInspect && S.inspection && S.inspection.operator) vals.operator = S.inspection.operator;
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
   }
@@ -1003,7 +1004,7 @@ function renderForm(mode, id) {
     <img class="preview" src="${src}" alt="Photo preview">
     <p class="qinfo">${mode === 'add' ? `Taken ${fmtDate(item.createdAt)}${item.dateSource === 'exif' ? ' (from photo)' : ''}` : ''}</p>
     <form id="photoForm" class="card" autocomplete="off">
-      <div class="field stage-field"><span class="lbl">Stage</span><div class="seg stage" id="fStage" role="radiogroup" aria-label="Stage">
+      <div class="field stage-field"${mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0 ? ' hidden' : ''}><span class="lbl">Stage</span><div class="seg stage" id="fStage" role="radiogroup" aria-label="Stage">
         <button type="button" data-v="pre" role="radio"><span>Before hardband</span><small>(inspection)</small></button>
         <button type="button" data-v="post" role="radio"><span>After hardband</span></button></div></div>
       <div class="pre-head" id="preHead" hidden></div>
@@ -1051,9 +1052,9 @@ function renderForm(mode, id) {
     ch.innerHTML = CHIPS[stage].map((c) => `<button type="button" data-chip="${esc(c)}">${esc(c)}</button>`).join('');
     $('#fNotes').placeholder = NOTES_HINT[stage];
     const pre = stage === 'pre', main = $('#mainFields'), more = $('#moreFields');
-    const order = pre ? ['Serial', 'PreChips'] : ['Customer', 'Rig', 'Operator', 'Spec', 'Serial', 'End', 'Band', 'Notes', 'Date'];
+    const order = pre ? ['Serial', 'PreChips', 'End'] : ['Customer', 'Rig', 'Operator', 'Spec', 'Serial', 'End', 'Band', 'Notes', 'Date'];
     order.map(fld).filter(Boolean).forEach((el) => main.appendChild(el));
-    if (pre) ['End', 'Band', 'Notes', 'Operator', 'Spec', 'Customer', 'Rig', 'Date'].map(fld).filter(Boolean).forEach((el) => more.appendChild(el));
+    if (pre) ['Band', 'Notes', 'Operator', 'Spec', 'Customer', 'Rig', 'Date'].map(fld).filter(Boolean).forEach((el) => more.appendChild(el));
     (pre ? $('#preChipSlot') : fld('Notes')).appendChild(ch);
     fld('PreChips').hidden = !pre; $('#moreBox').hidden = !pre; $('#preHead').hidden = !pre;
     if (pre) drawHead();
@@ -1152,6 +1153,7 @@ async function saveQueued(v) {
   S.photos.push(p);
   markDirty('photos', p.id);
   S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, stage: v.stage, operator: v.operator };
+  if (S.addInspect && S.inspection && v.serialNumber) S.inspection.serialNumber = v.serialNumber;
   if (v.operator) { rememberOperator(v.operator, true); if (S.addInspect && S.inspection) { S.inspection.operator = v.operator; drawInspBar(); } } // next photo: same operator
   if (S.addInspect && S.inspection) { Object.assign(S.inspection, { rigId: v.rigId || '', customerId: v.customerId || '', pipeSpecId: v.pipeSpecId || '' }); drawInspBar(); } // next photo: what was just saved
   S.savedCount++;
@@ -1767,7 +1769,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v16'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v17'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
