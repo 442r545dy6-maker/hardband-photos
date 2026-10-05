@@ -288,10 +288,13 @@ const Sync = {
       console.warn('sync:', e);
       this.lastError = e instanceof SyncError ? e : new SyncError(e.message || String(e), 'error');
     } finally {
+      const again = this.again; this.again = false;
       this.running = false;
       this.pending = await outboxCount();
       this.badge();
       if (this.changed) { this.changed = false; softRefresh(); }
+      // A Sync.run during this pass only set again; if we threw (e.g. 503) the do-while never saw it — retry now.
+      if (again) this.run('again');
     }
   },
 

@@ -938,7 +938,6 @@ function renderPhoto(id) {
         <dt>Band</dt><dd>${p.bandNumber ? (p.bandNumber === 'All' ? 'All / whole connection' : 'Band ' + esc(p.bandNumber)) : '—'}</dd>
         <dt>Condition</dt><dd style="white-space:pre-wrap">${esc(p.notes || '—')}</dd>
         <dt>Taken</dt><dd>${fmtDate(p.createdAt)}${p.dateSource === 'capture' ? ' <span class="muted small">(save time)</span>' : ''}</dd>
-        <dt>Size</dt><dd>${p.width || '?'}×${p.height || '?'} · ${Math.round((p.blob ? p.blob.size : 0) / 1024)} KB</dd>
       </dl>
     </div>
     <div class="stack form-actions">
@@ -2012,7 +2011,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v24'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v25'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
