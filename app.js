@@ -108,12 +108,29 @@ const STAGES = {
   preheat: { label: 'Preheat temp photo', short: 'Preheat', badge: 'PREHEAT', words: 'preheat temp temperature' },
 };
 const STAGE_ORDER = ['pre', 'repair', 'plasma', 'inlay', 'preheat', 'post'];
-const REPAIR_MID = ['repair', 'plasma', 'inlay']; // Repair joints only; Preheat sits before After (work order)
+const REPAIR_MID = ['repair', 'plasma', 'inlay']; // Repair joints only
+// Work order per joint. Repair joints skip Preheat (no preheat before plasma cutting):
+//   normal / reapply: Before → Preheat → After
+//   repair:           Before → Repair → Plasma cut → Inlay → After
+const PLAIN_SEQ = ['pre', 'preheat', 'post'];
+// Band auto-fill when End is picked: Box → Band 3, Pin → Band 2 (he can still tap another band to override).
+const END_BAND = { Box: '3', Pin: '2' };
+const REPAIR_SEQ = ['pre', 'repair', 'plasma', 'inlay', 'post'];
+/** Next stage in this joint's work order, or null at the end (After). Legacy Preheat on a repair joint → After. */
+function nextStage(st, repair) {
+  const seq = repair ? REPAIR_SEQ : PLAIN_SEQ;
+  const i = seq.indexOf(st);
+  if (i < 0) return st === 'preheat' ? 'post' : null;
+  return i < seq.length - 1 ? seq[i + 1] : null;
+}
 const stageOf = (p) => (p && STAGES[p.stage] ? p.stage : 'post');
 const stageBadge = (p, extra = '') => `<span class="stage-badge ${stageOf(p)}${extra ? ' ' + extra : ''}">${STAGES[stageOf(p)].badge}</span>`;
-// Repair joint = exact notes chip token "Repair" (comma-split / trim). Reapply alone does not unlock mid-stages.
+// Repair joint = a comma-split notes token that is the word "Repair" or starts with it (case-insensitive, word
+// boundary): "Repair", "repair", "Repair  Defender HB first Ptech…" (typed, no comma — D12) all count.
+// Not a repair joint: "Needs repair" (After condition chip), "Reapply", "Repaired" (no word boundary).
 const notesTokens = (notes) => String(notes || '').split(',').map((t) => t.trim()).filter(Boolean);
-const notesHasRepair = (notes) => notesTokens(notes).includes('Repair');
+const REPAIR_TOKEN = /^repair\b/i;
+const notesHasRepair = (notes) => notesTokens(notes).some((t) => REPAIR_TOKEN.test(t));
 function isRepairJoint(notes, serial, end) {
   if (notesHasRepair(notes)) return true;
   const k = serialKey(serial);
@@ -121,19 +138,42 @@ function isRepairJoint(notes, serial, end) {
   const e = end || '';
   return S.photos.some((x) => !x.deletedAt && serialKey(x.serialNumber) === k && (x.end || '') === e && notesHasRepair(x.notes));
 }
-function stageButtonsHTML(repair) {
-  // Work order: Before → Preheat → After. Repair joints insert Repair / Plasma cut / Inlay after Before, still before Preheat.
+function stageKeys(repair, keepPreheat) {
+  return repair ? ['pre', ...REPAIR_MID, ...(keepPreheat ? ['preheat'] : []), 'post'] : PLAIN_SEQ.slice();
+}
+function stageButtonsHTML(repair, keepPreheat) {
+  // Work order: Before → Preheat → After. Repair joints: Before → Repair → Plasma cut → Inlay → After (no Preheat).
+  // keepPreheat: an existing Preheat photo on a repair joint keeps its button so editing never silently changes its stage.
   const rows = repair
     ? [['pre', '<span>Before hardband</span><small>(inspection)</small>'],
        ['repair', '<span>Repair</span>'],
        ['plasma', '<span>Plasma cut</span>'],
        ['inlay', '<span>Inlay</span>'],
-       ['preheat', '<span>Preheat</span>'],
+       ...(keepPreheat ? [['preheat', '<span>Preheat</span>']] : []),
        ['post', '<span>After hardband</span>']]
     : [['pre', '<span>Before hardband</span><small>(inspection)</small>'],
        ['preheat', '<span>Preheat</span>'],
        ['post', '<span>After hardband</span>']];
   return rows.map(([v, html]) => `<button type="button" data-v="${v}" role="radio">${html}</button>`).join('');
+}
+// Pipe spec sticks for the whole job (he never changes pipe mid-job):
+//  - Start new job session active → the spec on that sheet (updated when he overrides it on a saved photo);
+//  - otherwise the spec of the most recently saved, non-deleted photo on that rig (same customer preferred);
+//  - '' when neither is known (caller keeps last-used).
+function rigLastSpec(rigId, customerId) {
+  if (!rigId) return '';
+  let best = null, bestT = -1, bestCust = false;
+  for (const x of S.photos) {
+    if (x.deletedAt || x.rigId !== rigId || !x.pipeSpecId || !S.pipeSpecs.has(x.pipeSpecId)) continue;
+    const c = !!customerId && x.customerId === customerId, t = x.addedAt || x.createdAt || 0;
+    if ((c && !bestCust) || (c === bestCust && t > bestT)) { best = x; bestT = t; bestCust = c; }
+  }
+  return best ? best.pipeSpecId : '';
+}
+function jobSpec(rigId, customerId) {
+  const sess = S.addInspect && S.inspection;
+  if (sess && sess.pipeSpecId && S.pipeSpecs.has(sess.pipeSpecId) && (!rigId || !sess.rigId || sess.rigId === rigId)) return sess.pipeSpecId;
+  return rigLastSpec(rigId, customerId);
 }
 function jointHasStage(serial, st) {
   const k = serialKey(serial);
@@ -1132,25 +1172,31 @@ function renderForm(mode, id) {
     // New capture (!Same joint) always starts Before — never sticky lastStage=After on a fresh joint.
     vals = { customerId: lu.customerId || '', rigId: lu.rigId || '', pipeSpecId: lu.pipeSpecId || '', serialNumber: '', end: '', bandNumber: '', notes: '', stage: 'pre', operator: currentOperator(), wire: currentWire() };
     if (S.addContext) Object.assign(vals, S.addContext);
-    if (S.batchValues) Object.assign(vals, { ...S.batchValues, bandNumber: '', notes: '' });
+    if (S.batchValues) Object.assign(vals, { ...S.batchValues, notes: '' }); // same joint: SN / end / band carried
     // Same joint: carry ALL Before metadata (SN, end, band, notes, operator, wire, customer, rig, spec) onto Preheat/After/repair — enter once.
     if (S.addKeep && S.lastSaved) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '', bandNumber: S.lastSaved.bandNumber || '', notes: S.lastSaved.notes || '', stage: stageOf(S.lastSaved), operator: cleanOp(S.lastSaved.operator) || currentOperator(), wire: cleanWire(S.lastSaved.wire) || currentWire() });
-    // Joint order: Before → Preheat → After. New joint / Next photo (keep=0) → Before.
+    // Joint order: Before → Preheat → After; repair joints Before → Repair → Plasma cut → Inlay → After.
+    // New joint / Next photo (keep=0) → Before. Same joint → next stage in that joint's order (After stays After).
     // forceStage (from saved CTA data-stage) wins over lastSaved races so After photo always opens After.
     const forced = S.forceStage; S.forceStage = null;
     if (forced && STAGES[forced]) { vals.stage = forced; if (S.lastSaved) S.addKeep = true; }
-    else if (S.addKeep && S.lastSaved && stageOf(S.lastSaved) === 'pre') vals.stage = 'preheat';
-    else if (S.addKeep && S.lastSaved && stageOf(S.lastSaved) === 'preheat') vals.stage = 'post';
+    else if (S.addKeep && S.lastSaved) { const ls = S.lastSaved, nx = nextStage(stageOf(ls), isRepairJoint(ls.notes, ls.serialNumber, ls.end)); if (nx) vals.stage = nx; }
     else if (!S.addKeep) vals.stage = 'pre';
     // Re-apply Same-joint carry if forceStage just restored addKeep (after a wiped pendingKeep race).
     if (S.addKeep && S.lastSaved && forced && STAGES[forced]) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '', bandNumber: S.lastSaved.bandNumber || '', notes: S.lastSaved.notes || '', operator: cleanOp(S.lastSaved.operator) || currentOperator(), wire: cleanWire(S.lastSaved.wire) || currentWire(), stage: forced });
     // Never trap on a second picture-only Preheat for the same joint — advance to After.
     if (vals.stage === 'preheat' && vals.serialNumber && jointHasStage(vals.serialNumber, 'preheat')) vals.stage = 'post';
+    // Repair joints never get a new Preheat photo (no preheat before plasma cutting) — go to the next repair step.
+    if (vals.stage === 'preheat' && isRepairJoint(vals.notes, vals.serialNumber, vals.end)) vals.stage = 'post';
     if (S.addInspect && S.addKeep && S.inspection && S.inspection.serialNumber) vals.serialNumber = S.inspection.serialNumber;
     if (S.addInspect && S.inspection && S.inspection.operator) vals.operator = S.inspection.operator;
     if (S.addInspect && S.inspection) vals.wire = S.inspection.wire || ''; // the job's wire (Start new job / last photo)
     // Repair mid-stages only on repair joints; otherwise fall back (inspection → Before, else After)
     if (REPAIR_MID.includes(vals.stage) && !isRepairJoint(vals.notes, vals.serialNumber, vals.end)) vals.stage = S.addInspect ? 'pre' : 'post';
+    // Pipe spec = the job's spec (session sheet, else this rig's last saved photo), never a stale last-used from another rig.
+    { const js = jobSpec(vals.rigId, vals.customerId); if (js) vals.pipeSpecId = js; }
+    // End pre-filled with no band: use that end's default band (never overwrite a carried band).
+    if (!vals.bandNumber && END_BAND[vals.end]) vals.bandNumber = END_BAND[vals.end];
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
   }
   for (const [k, kind] of [['customerId', 'customers'], ['rigId', 'rigs'], ['pipeSpecId', 'pipeSpecs']]) if (vals[k] && !S[kind].has(vals[k])) vals[k] = '';
@@ -1163,7 +1209,7 @@ function renderForm(mode, id) {
     <img class="preview" src="${src}" alt="Photo preview">
     <p class="qinfo">${mode === 'add' ? `Taken ${fmtDate(item.createdAt)}${item.dateSource === 'exif' ? ' (from photo)' : ''}` : ''}</p>
     <form id="photoForm" class="card" autocomplete="off">
-      <div class="field stage-field"${mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0 ? ' hidden' : ''}><span class="lbl">Stage</span><div class="seg stage multi-stages${isRepairJoint(vals.notes, vals.serialNumber, vals.end) ? ' repair-stages' : ''}" id="fStage" role="radiogroup" aria-label="Stage">${stageButtonsHTML(isRepairJoint(vals.notes, vals.serialNumber, vals.end))}</div></div>
+      <div class="field stage-field"${mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0 ? ' hidden' : ''}><span class="lbl">Stage</span><div class="seg stage multi-stages${isRepairJoint(vals.notes, vals.serialNumber, vals.end) ? ' repair-stages' : ''}" id="fStage" role="radiogroup" aria-label="Stage">${stageButtonsHTML(isRepairJoint(vals.notes, vals.serialNumber, vals.end), vals.stage === 'preheat')}</div></div>
       <div class="pre-head" id="preHead" hidden></div>
       <div class="pre-head" id="preheatHead" hidden></div>
       <div id="mainFields">
@@ -1247,12 +1293,14 @@ function renderForm(mode, id) {
   const syncRepairStages = () => {
     const repair = isRepairJoint($('#fNotes').value, $('#fSerial').value, end);
     const box = $('#fStage');
-    const want = repair ? 'pre,repair,plasma,inlay,preheat,post' : 'pre,preheat,post';
+    // Repair joints have no Preheat button, except a photo that already is (or was opened as) Preheat keeps it.
+    const keepHeat = vals.stage === 'preheat' || stage === 'preheat';
+    const want = stageKeys(repair, keepHeat).join(',');
     const have = [...box.querySelectorAll('button')].map((b) => b.dataset.v).join(',');
     let changed = false;
     if (REPAIR_MID.includes(stage) && !repair) { stage = (mode === 'add' && S.addInspect) ? 'pre' : 'post'; changed = true; }
     if (have !== want) {
-      box.innerHTML = stageButtonsHTML(repair);
+      box.innerHTML = stageButtonsHTML(repair, keepHeat);
       box.classList.add('multi-stages'); box.classList.toggle('repair-stages', repair);
       changed = true;
     }
@@ -1265,7 +1313,17 @@ function renderForm(mode, id) {
     stage = b.dataset.v; drawStage();
     if (stage === 'pre' && !$('#fSerial').value) $('#fSerial').focus();
   };
-  $('#fRig').addEventListener('change', () => { if (stage === 'pre') drawHead(); });
+  // New photo: picking another rig re-defaults Pipe spec to that rig's job spec, unless he picked a spec by hand here.
+  let specTouched = false;
+  $('#fSpec').addEventListener('change', () => { if ($('#fSpec').value !== '__new') specTouched = true; });
+  const respec = () => {
+    if (mode !== 'add' || specTouched) return;
+    const js = jobSpec($('#fRig').value.replace('__new', ''), $('#fCustomer').value.replace('__new', ''));
+    const sp = $('#fSpec');
+    if (js && sp.value !== js && sp.querySelector(`option[value="${CSS.escape(js)}"]`)) sp.value = js;
+  };
+  $('#fRig').addEventListener('change', () => { respec(); if (stage === 'pre') drawHead(); });
+  $('#fCustomer').addEventListener('change', respec);
   // Notes peek is text-only (safe on input). syncRepairStages reparents via appendChild and blurs iOS — blur/change only.
   $('#fNotes').addEventListener('input', peekNotes);
   $('#fNotes').addEventListener('blur', syncRepairStages);
@@ -1283,7 +1341,7 @@ function renderForm(mode, id) {
     $('#bandHint').textContent = end === 'Pin' ? 'Pin has 2 bands.' : end === 'Box' ? 'Box has 3 bands.' : 'Box has 3 bands, Pin has 2. Pick an end first.';
   };
   drawSeg();
-  $('#fEnd').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; const was = end; end = b.dataset.v; if ((end === 'Pin' || end === 'Box') && was !== end) band = 'All'; drawSeg(); syncRepairStages(); };
+  $('#fEnd').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; const was = end; end = b.dataset.v; if (END_BAND[end] && was !== end) band = END_BAND[end]; drawSeg(); syncRepairStages(); };
   $('#fBand').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; band = band === b.dataset.v ? '' : b.dataset.v; drawSeg(); };
   $('.chips').onclick = (e) => {
     const c = e.target.closest('[data-chip]'); if (!c) return;
@@ -1359,7 +1417,7 @@ async function saveQueued(v) {
   await putPhoto(p);
   S.photos.push(p);
   markDirty('photos', p.id);
-  S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, stage: v.stage, operator: v.operator, wire: v.wire };
+  S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, bandNumber: v.bandNumber, stage: v.stage, operator: v.operator, wire: v.wire };
   if (S.addInspect && S.inspection && v.serialNumber) S.inspection.serialNumber = v.serialNumber;
   if (v.operator) { rememberOperator(v.operator, true); if (S.addInspect && S.inspection) { S.inspection.operator = v.operator; drawInspBar(); } } // next photo: same operator
   if (v.wire) rememberWire(v.wire, true); // next job / photo: same wire
@@ -1390,7 +1448,20 @@ function renderSaved() {
       <p class="muted">${esc(labelOf('customers', p.customerId) || '—')} / ${esc(labelOf('rigs', p.rigId) || '—')}${p.serialNumber ? ' · SN ' + esc(p.serialNumber) : ''}</p><p class="muted small" id="savedOp">👷 ${esc(opText(p))}</p><p id="savedStage">${stageBadge(p)} ${esc(STAGES[stageOf(p)].label)}</p></div>
     <div class="stack">
       ${(() => {
-        const sn = p.serialNumber || '', st = stageOf(p);
+        const sn = p.serialNumber || '', st = stageOf(p), snTxt = sn ? ` (SN ${esc(sn)})` : '';
+        const repair = isRepairJoint(p.notes, p.serialNumber, p.end);
+        // Repair joint: primary = next step in Before → Repair → Plasma cut → Inlay → After (same joint, SN kept).
+        // After Before, Plasma cut is offered directly too (the Repair photo is often skipped). Never Preheat.
+        if (repair && st === 'pre' && sn) return `<p class="muted small" id="savedNextHint">Next for SN ${esc(sn)}: Repair → Plasma cut → Inlay → After</p>
+      <label for="camInput" class="btn primary big block" data-keep="1" data-stage="repair" id="nextPhotoBtn">📷 Repair photo${snTxt}</label>
+      <label for="camInput" class="btn secondary big block" data-keep="1" data-stage="plasma" id="plasmaBtn">🔥 Plasma cut photo${snTxt}</label>
+      <label for="camInput" class="btn ghost block" data-keep="0" id="nextJointBtn">Next joint</label>`;
+        if (repair && REPAIR_MID.includes(st)) {
+          const nx = nextStage(st, true);
+          return `<p class="muted small" id="savedNextHint">Next: ${esc(STAGES[nx].label)} photo${sn ? ' for SN ' + esc(sn) : ''}</p>
+      <label for="camInput" class="btn primary big block" data-keep="1" data-stage="${nx}" id="nextPhotoBtn">📷 ${esc(STAGES[nx].short === 'After' ? 'After' : STAGES[nx].label)} photo${snTxt}</label>
+      <label for="camInput" class="btn ghost block" data-keep="0" id="nextJointBtn">Next joint</label>`;
+        }
         // After Before+SN: primary = Preheat for that joint (keep SN); secondary = next joint.
         if (st === 'pre' && sn) return `<label for="camInput" class="btn primary big block" data-keep="1" data-stage="preheat" id="nextPhotoBtn">📷 Preheat photo (SN ${esc(sn)})</label>
       <label for="camInput" class="btn secondary block" data-keep="0" id="nextJointBtn">📷 Next joint</label>`;
@@ -1534,9 +1605,20 @@ function startInspectionSheet() {
     if (!sel.value) return { msg, el: sel, text: `Pick the ${what} first.` };
     return { id: sel.value };
   };
+  // Pipe spec follows the picked rig's job spec (its last saved photo) until he picks a spec by hand.
+  let specTouched = false;
+  $('#inspSpec', m).addEventListener('change', () => { specTouched = true; });
+  const respec = () => {
+    const rigId = $('#inspRigPick', m).value, custId = $('#inspCustPick', m).value;
+    if (specTouched || !rigId || rigId === '__new') return;
+    const js = rigLastSpec(rigId, custId === '__new' ? '' : custId), sp = $('#inspSpec', m);
+    if (!js || sp.value === js) return;
+    if (!sp.querySelector(`option[value="${CSS.escape(js)}"]`)) { const o = document.createElement('option'); o.value = js; o.textContent = labelOf('pipeSpecs', js); sp.appendChild(o); }
+    sp.value = js;
+  };
   for (const id of ['inspRigPick', 'inspCustPick']) {
     const sel = $('#' + id, m), box = $('#' + id + 'New', m), msg = $('#' + id + 'Msg', m);
-    sel.addEventListener('change', () => { msg.textContent = ''; box.hidden = sel.value !== '__new'; if (!box.hidden) box.focus(); });
+    sel.addEventListener('change', () => { msg.textContent = ''; box.hidden = sel.value !== '__new'; if (!box.hidden) box.focus(); respec(); });
     box.addEventListener('input', () => { msg.textContent = ''; });
     box.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); box.blur(); } }); // keyboard closes; Open camera needs its own tap
   }
@@ -2011,7 +2093,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v25'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v26'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
