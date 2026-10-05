@@ -111,6 +111,17 @@ itself within a few minutes after it's run. Until then, other phones see the rej
 Phones keep working before you run it: the work order typed on **Start inspection** stays with each photo on the
 phone and is uploaded by itself within a few minutes after it's run.
 
+### ▶ Then: Wire on photos (Start new job, hbp-v20) — one line, run it once
+1. **SQL Editor** → new, empty query.
+2. Paste this single line and click **Run** (no quote marks, so iPhone "smart quotes" can't break it):
+
+   alter table public.photos add column if not exists wire text;
+
+   (Same as `supabase/migrations/008_wire.sql`.) It only adds one column; nothing is changed or deleted. Safe to run again.
+
+Phones keep working before you run it: the wire picked on **Start new job** / the photo form stays with each photo on
+the phone and is uploaded by itself within a few minutes after it's run.
+
 ### ▶ Then: Repair mid-stages on photos — run it once (after 002)
 Needed so Repair photos (*Repair* / *Plasma cut* / *Inlay* / *Preheat*) can sync. Until this runs they stay on the phone.
 1. **SQL Editor** → new, empty query.

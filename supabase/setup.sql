@@ -129,6 +129,10 @@ alter table public.rejects add column if not exists work_order text;
 -- Work order # from the Start inspection sheet; null = none (older photos). Same as supabase/migrations/006_photo_work_order.sql.
 alter table public.photos add column if not exists work_order text;
 
+-- ---------- migration 008: hardband wire on photos ----------
+-- Wire picked on Start new job / the photo form, e.g. 'Duraband NC'; null = none. Same as supabase/migrations/008_wire.sql.
+alter table public.photos add column if not exists wire text;
+
 -- ---------- indexes (phones pull "changed since" by updated_at) ----------
 create index if not exists customers_updated_at_idx  on public.customers  (updated_at, id);
 create index if not exists rigs_updated_at_idx       on public.rigs       (updated_at, id);

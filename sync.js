@@ -67,6 +67,7 @@ function photoToRow(p) {
     stage: (p.stage === 'pre' || p.stage === 'repair' || p.stage === 'plasma' || p.stage === 'inlay' || p.stage === 'post' || p.stage === 'preheat') ? p.stage : 'post', // known keys pass through; missing/unknown → post
     operator: String(p.operator || '').trim().replace(/\s+/g, ' ') || null, // "Name Number", e.g. "Dusty 104" (migration 003)
     work_order: String(p.workOrder || '').trim() || null, // Work order # from Start inspection (migration 006)
+    wire: String(p.wire || '').trim().replace(/\s+/g, ' ') || null, // hardband wire, e.g. "Duraband NC" (migration 008)
   };
 }
 function applyPhotoRow(p, r) {
@@ -92,6 +93,11 @@ function applyPhotoRow(p, r) {
   if ('work_order' in r) {
     if (r.work_order) p.workOrder = String(r.work_order);
     else if (!(S.meta.photoWorkOrderBacklog || []).includes(r.id)) p.workOrder = '';
+  }
+  // Wire (migration 008_wire.sql): same rule as the operator.
+  if ('wire' in r) {
+    if (r.wire) p.wire = String(r.wire);
+    else if (!(S.meta.wireBacklog || []).includes(r.id)) p.wire = '';
   }
   if (r.deleted_at) p.deletedAt = tsMs(r.deleted_at); else delete p.deletedAt;
   if (!('blob' in p)) p.blob = null;
@@ -154,9 +160,9 @@ async function sbFetch(path, { method = 'GET', headers = {}, body, timeout } = {
 // (006_photo_work_order.sql). Until a migration is
 // run, PostgREST answers 400 PGRST204 "Could not find the 'stage' column of 'photos' in the schema cache"
 // (42703 "column photos.stage does not exist" on a select). missingCol() tells which column the server lacks.
-const OPT_COLS = ['stage', 'operator', 'work_order'];
+const OPT_COLS = ['stage', 'operator', 'work_order', 'wire']; // + wire (008_wire.sql)
 // Name used for each column's Sync flags (<name>Col / <name>CheckedAt) and its meta.<name>Backlog list.
-const COL_KEY = { stage: 'stage', operator: 'operator', work_order: 'photoWorkOrder' };
+const COL_KEY = { stage: 'stage', operator: 'operator', work_order: 'photoWorkOrder', wire: 'wire' };
 // Reject columns added by later migrations: work_order (005_reject_work_order.sql). Same detection as for photos.
 const REJECT_OPT_COLS = ['work_order'];
 const missingCol = (e, cols = OPT_COLS) => {
@@ -179,7 +185,7 @@ const downloadObj = async (path) => { const res = await sbFetch(objPath(path), {
 
 /* ---------- the engine ---------- */
 const Sync = {
-  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, operatorCol: null, operatorCheckedAt: 0, photoWorkOrderCol: null, photoWorkOrderCheckedAt: 0, workOrderCol: null, workOrderCheckedAt: 0, rejectsTable: null, rejectsCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
+  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, operatorCol: null, operatorCheckedAt: 0, photoWorkOrderCol: null, photoWorkOrderCheckedAt: 0, wireCol: null, wireCheckedAt: 0, workOrderCol: null, workOrderCheckedAt: 0, rejectsTable: null, rejectsCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
   get session() { return S.meta.syncSession || null; },
   get signedIn() { return !!(HB_CFG.on && this.session && this.session.refresh_token); },
 
@@ -293,6 +299,7 @@ const Sync = {
     await this.stageCatchUp();
     await this.operatorCatchUp();
     await this.photoWorkOrderCatchUp();
+    await this.wireCatchUp();
     await this.rejectsCatchUp();
     await this.workOrderCatchUp();
     const entries = (await db.all('outbox')).sort((a, b) => a.at - b.at);
@@ -407,6 +414,11 @@ const Sync = {
   photoWorkOrderCatchUp() {
     return this.fillInLater({ table: 'photos', col: 'work_order', flag: 'photoWorkOrder', backlogKey: 'photoWorkOrderBacklog',
       valueOf: async (id) => { const p = await photoRecord(id); return p && photoToRow(p).work_order; } });
+  },
+  // Photos uploaded while photos.wire was missing (008_wire.sql).
+  wireCatchUp() {
+    return this.fillInLater({ table: 'photos', col: 'wire', flag: 'wire', backlogKey: 'wireBacklog',
+      valueOf: async (id) => { const p = await photoRecord(id); return p && photoToRow(p).wire; } });
   },
   async pushRejects(entries) {
     if (!entries.length) return;
@@ -599,7 +611,7 @@ const Sync = {
         const lts = stampOf('photos', p);
         if (p && dirty && lts > rts) continue;
         // (an operator filled in later by another phone's catch-up PATCH keeps the edit time, so compare it too)
-        const sameExtra = p && (!r.operator || r.operator === p.operator) && (!r.work_order || r.work_order === p.workOrder);
+        const sameExtra = p && (!r.operator || r.operator === p.operator) && (!r.work_order || r.work_order === p.workOrder) && (!r.wire || r.wire === p.wire);
         if (p && !dirty && lts === rts && sameExtra && !!p.deletedAt === !!r.deleted_at && (p.remoteImage || !r.image_path)) continue;
         p = applyPhotoRow(p || { blob: null, thumb: null }, r);
         if (p.deletedAt) { p.blob = null; p.thumb = null; } // someone deleted it; a copy stays on the server

@@ -16,6 +16,8 @@ optionally, in a **shared team library** (Supabase), so the whole crew sees the 
   One line, no quote characters (like 006)
 - `supabase/migrations/006_photo_work_order.sql`: adds `photos.work_order` (Work order # from Start inspection, v13–v15; optional since hbp-v16). One
   line, no quote characters, so it survives iPhone smart quotes
+- `supabase/migrations/008_wire.sql`: adds `photos.wire` (hbp-v20 Wire field). One line, no quote characters:
+  `alter table public.photos add column if not exists wire text;` Until it runs, the wire stays on the phone and uploads later
 - `supabase/migrations/007_repair_stages.sql`: widens `photos_stage_check` so Repair mid-stages (`repair`, `plasma`, `inlay`, `preheat`)
   sync. File + ASCII one-liner for Dusty's iPhone (smart quotes break SQL — Abby may need to paste)
 - `SUPABASE_SETUP.md`: click-by-click setup for a non-developer
@@ -44,8 +46,12 @@ existed have no stage and count as `post`.
 - Team sync needs `007_repair_stages.sql` (widen `photos_stage_check` to allow `pre`/`repair`/`plasma`/`inlay`/`post`/`preheat`).
   Until Dusty runs it, repair mid-stages stay on the phone (IndexedDB) and uploads of those keys are rejected by the
   old check.
-- **🔍 Start inspection** (home screen): a sheet with, in this order, **Operator (you)** (the saved-operator picker,
-  required, *＋ Add new operator…* inline), **Rig name**, **Customer** and **Pipe spec**, then **📷 Open camera**. All
+- **🔍 Start new job** (home screen; was *Start inspection* before hbp-v20): a sheet with, in this order, **Operator (you)** (the saved-operator picker,
+  required, *＋ Add new operator…* inline), **Rig name**, **Customer**, **Pipe spec** and **Wire**, then **📷 Open camera**.
+  *Wire* (optional): *— Pick the wire —*, **＋ Add new wire…** (plain text box, added to the list on this phone), then
+  Duraband NC, Tuffband NC, Arnco 100XT/150XT/200XT/300XT/350XT/400XT, BoTn 5000, Build-up and any custom wires. The
+  last-used wire is preselected; every photo of the job stores it (editable on the photo form, shown on the detail,
+  `wire` column in metadata.csv / metadata.json, synced as `photos.wire`). All
   are native `<select>`s (no `<datalist>` anywhere in the app: iOS home-screen apps crashed on one):
   - *Rig name*: placeholder *— Pick the rig —*, then **＋ Add new rig…** at the top, then the saved rigs. Starts
     unselected every time; required.

@@ -270,6 +270,76 @@ function operatorSheet() {
   return m;
 }
 
+/* ---------- wire: which hardband wire was used on the job ----------
+   Stored on each photo as one text value (Supabase column photos.wire, migration 008_wire.sql), e.g. "Duraband NC".
+   Common wires are always offered; "＋ Add new wire…" reveals a plain text box (no datalist: iOS crashed on those), the
+   typed name joins the pick list on this phone (localStorage) and is selected. Same name, any case = same wire.
+   The last wire used is remembered (localStorage) and preset on Start new job and new photos. */
+const WIRE_LS = { cur: 'hbp.wire', list: 'hbp.wires' };
+const WIRE_COMMON = ['Duraband NC', 'Tuffband NC', 'Arnco 100XT', 'Arnco 150XT', 'Arnco 200XT', 'Arnco 300XT', 'Arnco 350XT', 'Arnco 400XT', 'BoTn 5000', 'Build-up'];
+const cleanWire = (s) => String(s || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+const wireKey = (s) => cleanWire(s).toLowerCase();
+const currentWire = () => cleanWire(lsGet(WIRE_LS.cur, ''));
+function rememberWire(w, makeCurrent) {
+  const v = cleanWire(w); if (!v) return;
+  if (!WIRE_COMMON.some((x) => wireKey(x) === wireKey(v))) {
+    const list = (lsGet(WIRE_LS.list, []) || []).filter((x) => wireKey(x) !== wireKey(v));
+    lsSet(WIRE_LS.list, [v, ...list].slice(0, 100));
+  }
+  if (makeCurrent) lsSet(WIRE_LS.cur, v);
+}
+// Common wires first (fixed order), then this phone's custom wires and any found on (shared) photos, A-Z.
+function wireRoster() {
+  const seen = new Set(WIRE_COMMON.map(wireKey)), extra = [];
+  const add = (w) => { const v = cleanWire(w), k = wireKey(v); if (k && !seen.has(k)) { seen.add(k); extra.push(v); } };
+  for (const w of lsGet(WIRE_LS.list, []) || []) add(w);
+  add(currentWire());
+  for (const p of S.photos || []) add(p.wire);
+  return [...WIRE_COMMON, ...extra.sort(byText)];
+}
+const canonWire = (w) => { const k = wireKey(w); return k ? (wireRoster().find((x) => wireKey(x) === k) || cleanWire(w)) : ''; };
+function wireFieldHTML(id, value, { wrapId = '', label = 'Wire', blank = '— Pick the wire —' } = {}) {
+  const v = canonWire(value), list = wireRoster();
+  if (v && !list.includes(v)) list.push(v);
+  return `<div class="field wire-field"${wrapId ? ` id="${wrapId}"` : ''}><label for="${id}">${esc(label)}</label>
+    <select id="${id}" class="wire-select"><option value="" ${v ? '' : 'selected'}>${esc(blank)}</option><option value="__new">＋ Add new wire…</option>${list.map((w) => `<option value="${esc(w)}" ${w === v ? 'selected' : ''}>${esc(w)}</option>`).join('')}</select>
+    <div class="wire-add" id="${id}Add" hidden>
+      <input id="${id}New" type="text" maxlength="80" placeholder="Type the wire name" autocapitalize="words" autocorrect="off" spellcheck="false" autocomplete="off" enterkeyhint="done">
+      <div class="row op-add-actions"><button type="button" class="btn ghost" id="${id}AddCancel">Cancel</button><button type="button" class="btn primary" id="${id}AddOk">Add wire</button></div>
+    </div>
+    <div class="small op-msg" id="${id}Msg" role="alert"></div></div>`;
+}
+function bindWireField(id, { onChange = null } = {}) {
+  const sel = $('#' + id), box = $('#' + id + 'Add'), inp = $('#' + id + 'New'), msg = $('#' + id + 'Msg');
+  let prev = sel.value === '__new' ? '' : sel.value;
+  const choose = (w) => {
+    if (w && ![...sel.options].some((o) => o.value === w)) { const o = document.createElement('option'); o.value = w; o.textContent = w; sel.appendChild(o); }
+    sel.value = w; prev = w; box.hidden = true; msg.textContent = '';
+    if (onChange) onChange(w);
+  };
+  const ctl = {
+    get value() { return sel.value === '__new' ? '' : sel.value; },
+    get adding() { return !box.hidden; },
+    choose,
+    // Put the typed wire in the pick list and select it (same name in any case = the existing one). '' if blank.
+    commit() {
+      const v = cleanWire(inp.value);
+      if (!v) { msg.textContent = 'Type the wire name (or Cancel).'; inp.focus(); return ''; }
+      const w = canonWire(v); rememberWire(w); choose(w); return w;
+    },
+  };
+  sel.addEventListener('change', () => {
+    msg.textContent = '';
+    if (sel.value !== '__new') { prev = sel.value; box.hidden = true; if (onChange) onChange(sel.value); return; }
+    inp.value = ''; box.hidden = false; setTimeout(() => inp.focus(), 30);
+  });
+  $('#' + id + 'AddCancel').onclick = () => { box.hidden = true; msg.textContent = ''; sel.value = prev; };
+  $('#' + id + 'AddOk').onclick = () => ctl.commit();
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); ctl.commit(); } });
+  inp.addEventListener('input', () => { msg.textContent = ''; });
+  return ctl;
+}
+
 const SEED = {
   customer: { id: 'c_eog', name: 'EOG' },
   rig: { id: 'r_six', name: 'Six', notes: 'Possibly H&P 246 — confirm and rename' },
@@ -613,7 +683,7 @@ const hasSearch = () => { const s = S.search; return !!(s.q.trim() || s.customer
 const filterCount = () => { const s = S.search; return [s.op, s.customerId, s.rigId, s.end, s.stage, s.from, s.to].filter(Boolean).length; };
 function haystack(p) {
   return [labelOf('customers', p.customerId), labelOf('rigs', p.rigId), (S.rigs.get(p.rigId) || {}).notes, labelOf('pipeSpecs', p.pipeSpecId),
-    p.serialNumber, p.end, p.bandNumber ? 'B' + p.bandNumber : '', p.notes, isoDay(p.createdAt), STAGES[stageOf(p)].words, cleanOp(p.operator)].join(' \u0001 ').toLowerCase();
+    p.serialNumber, p.end, p.bandNumber ? 'B' + p.bandNumber : '', p.notes, isoDay(p.createdAt), STAGES[stageOf(p)].words, cleanOp(p.operator), p.wire || ''].join(' \u0001 ').toLowerCase();
 }
 function searchPhotos() {
   const s = S.search;
@@ -834,6 +904,7 @@ function renderPhoto(id) {
         <dt>Customer</dt><dd>${esc(labelOf('customers', p.customerId) || '—')}</dd>
         <dt>Rig</dt><dd>${esc(rig.name || '—')}${rig.notes ? `<div class="muted small">${esc(rig.notes)}</div>` : ''}</dd>
         <dt>Pipe spec</dt><dd>${esc(labelOf('pipeSpecs', p.pipeSpecId) || '—')}</dd>
+        <dt>Wire</dt><dd id="detailWire">${esc(p.wire || '—')}</dd>
         <dt>Serial #</dt><dd>${esc(p.serialNumber || '—')}</dd>
         <dt>End</dt><dd>${esc(p.end || '—')}</dd>
         <dt>Band</dt><dd>${p.bandNumber ? (p.bandNumber === 'All' ? 'All / whole connection' : 'Band ' + esc(p.bandNumber)) : '—'}</dd>
@@ -1025,19 +1096,20 @@ function renderForm(mode, id) {
   if (mode === 'edit') {
     p = S.photos.find((x) => x.id === id);
     if (!p) { location.hash = '#/'; return; }
-    vals = { customerId: p.customerId, rigId: p.rigId, pipeSpecId: p.pipeSpecId, serialNumber: p.serialNumber || '', end: p.end || '', bandNumber: p.bandNumber || '', notes: p.notes || '', createdAt: p.createdAt, stage: stageOf(p), operator: cleanOp(p.operator) };
+    vals = { customerId: p.customerId, rigId: p.rigId, pipeSpecId: p.pipeSpecId, serialNumber: p.serialNumber || '', end: p.end || '', bandNumber: p.bandNumber || '', notes: p.notes || '', createdAt: p.createdAt, stage: stageOf(p), operator: cleanOp(p.operator), wire: cleanWire(p.wire) };
     setChrome({ title: 'Edit photo', back: `#/photo/${encodeURIComponent(id)}`, bottom: false });
   } else {
     item = S.queue[S.qIndex];
     if (!item) { location.hash = '#/'; return; }
     const lu = S.meta.lastUsed || {};
-    vals = { customerId: lu.customerId || '', rigId: lu.rigId || '', pipeSpecId: lu.pipeSpecId || '', serialNumber: '', end: '', bandNumber: '', notes: '', stage: STAGES[S.meta.lastStage] ? S.meta.lastStage : 'post', operator: currentOperator() };
+    vals = { customerId: lu.customerId || '', rigId: lu.rigId || '', pipeSpecId: lu.pipeSpecId || '', serialNumber: '', end: '', bandNumber: '', notes: '', stage: STAGES[S.meta.lastStage] ? S.meta.lastStage : 'post', operator: currentOperator(), wire: currentWire() };
     if (S.addContext) Object.assign(vals, S.addContext);
     if (S.addKeep && S.lastSaved) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '', stage: stageOf(S.lastSaved) });
     if (S.batchValues) Object.assign(vals, { ...S.batchValues, bandNumber: '', notes: '' });
     if (S.addInspect) vals.stage = 'pre'; // inspection session: every new photo starts as Before hardband
     if (S.addInspect && S.addKeep && S.inspection && S.inspection.serialNumber) vals.serialNumber = S.inspection.serialNumber;
     if (S.addInspect && S.inspection && S.inspection.operator) vals.operator = S.inspection.operator;
+    if (S.addInspect && S.inspection) vals.wire = S.inspection.wire || ''; // the job's wire (Start new job / last photo)
     // Repair mid-stages only on repair joints; otherwise fall back (inspection → Before, else After)
     if (REPAIR_MID.includes(vals.stage) && !isRepairJoint(vals.notes, vals.serialNumber, vals.end)) vals.stage = S.addInspect ? 'pre' : 'post';
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
@@ -1059,6 +1131,7 @@ function renderForm(mode, id) {
       <div class="field" id="fldRig"><label for="fRig">Rig</label>${selectHTML('rigs', 'rigId', 'fRig')}</div>
       ${opFieldHTML('fOperator', vals.operator, { wrapId: 'fldOperator', blank: 'No operator' })}
       <div class="field" id="fldSpec"><label for="fSpec">Pipe spec</label>${selectHTML('pipeSpecs', 'pipeSpecId', 'fSpec')}</div>
+      ${wireFieldHTML('fWire', vals.wire, { wrapId: 'fldWire', blank: 'No wire' })}
       <div class="field" id="fldSerial"><label for="fSerial">Serial number</label>
         <input id="fSerial" type="text" value="${esc(vals.serialNumber)}" placeholder="Stamped serial / joint #" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="done">
         <div class="pick-list" id="snPick" hidden></div></div>
@@ -1073,7 +1146,7 @@ function renderForm(mode, id) {
         <div class="chips" id="fChips" data-stage="${vals.stage}"></div></div>
       ${mode === 'edit' ? `<div class="field" id="fldDate"><label for="fDate">Date / time taken</label><input id="fDate" type="datetime-local" value="${dtLocalValue(vals.createdAt)}"></div>` : ''}
       </div>
-      <details class="more-box" id="moreBox" hidden><summary>More details <span class="muted small">Box/Pin, band, notes, operator, pipe spec, customer${mode === 'edit' ? ', date' : ''}</span></summary><div id="moreFields"></div></details>
+      <details class="more-box" id="moreBox" hidden><summary>More details <span class="muted small">Box/Pin, band, notes, operator, pipe spec, wire, customer${mode === 'edit' ? ', date' : ''}</span></summary><div id="moreFields"></div></details>
       <div class="stack form-actions">
         ${mode === 'edit'
     ? `<button type="submit" class="btn primary big block" id="saveBtn">Save changes</button><a class="btn ghost block" href="#/photo/${encodeURIComponent(id)}">Cancel</a>`
@@ -1091,6 +1164,7 @@ function renderForm(mode, id) {
   const peekNotes = () => { const pk = $('#notesPeek'), v = $('#fNotes').value.trim(); pk.hidden = stage !== 'pre' || !v || $('#moreBox').open; pk.textContent = v ? 'Notes: ' + v : ''; };
   const drawHead = () => { $('#preHead').innerHTML = `<span class="pre-head-rig">📁 ${esc(labelOf('rigs', $('#fRig').value) || 'No rig')}</span> · ${stageBadge({ stage: 'pre' })} <b>Before hardband</b> <span class="pre-head-op" id="preHeadOp">· 👷 ${esc(opText({ operator: opCtl.value }))}</span>`; };
   const opCtl = bindOpField('fOperator', { onChange: () => { if (stage === 'pre') drawHead(); } });
+  const wireCtl = bindWireField('fWire');
   attachPickList($('#fSerial'), $('#snPick'), serials);
   const drawStage = () => {
     $$('#fStage button').forEach((b) => { const on = b.dataset.v === stage; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
@@ -1099,9 +1173,9 @@ function renderForm(mode, id) {
     $('#fNotes').placeholder = NOTES_HINT[stage] || '';
     // Only `pre` uses the Before inspection layout; repair/plasma/inlay/preheat use the full (post) layout.
     const pre = stage === 'pre', main = $('#mainFields'), more = $('#moreFields');
-    const order = pre ? ['Serial', 'PreChips', 'End'] : ['Customer', 'Rig', 'Operator', 'Spec', 'Serial', 'End', 'Band', 'Notes', 'Date'];
+    const order = pre ? ['Serial', 'PreChips', 'End'] : ['Customer', 'Rig', 'Operator', 'Spec', 'Wire', 'Serial', 'End', 'Band', 'Notes', 'Date'];
     order.map(fld).filter(Boolean).forEach((el) => main.appendChild(el));
-    if (pre) ['Band', 'Notes', 'Operator', 'Spec', 'Customer', 'Rig', 'Date'].map(fld).filter(Boolean).forEach((el) => more.appendChild(el));
+    if (pre) ['Band', 'Notes', 'Operator', 'Spec', 'Wire', 'Customer', 'Rig', 'Date'].map(fld).filter(Boolean).forEach((el) => more.appendChild(el));
     (pre ? $('#preChipSlot') : fld('Notes')).appendChild(ch);
     fld('PreChips').hidden = !pre; $('#moreBox').hidden = !pre; $('#preHead').hidden = !pre;
     if (pre) drawHead();
@@ -1161,10 +1235,10 @@ function renderForm(mode, id) {
   });
   const collect = () => ({
     customerId: $('#fCustomer').value.replace('__new', ''), rigId: $('#fRig').value.replace('__new', ''), pipeSpecId: $('#fSpec').value.replace('__new', ''),
-    serialNumber: $('#fSerial').value.trim().toUpperCase(), end, bandNumber: band, notes: $('#fNotes').value.trim(), stage, operator: cleanOp(opCtl.value),
+    serialNumber: $('#fSerial').value.trim().toUpperCase(), end, bandNumber: band, notes: $('#fNotes').value.trim(), stage, operator: cleanOp(opCtl.value), wire: cleanWire(wireCtl.value),
   });
   // A half-typed new operator is saved with the photo (or the save waits for the missing name/number).
-  const opReady = () => !opCtl.adding || !!opCtl.commit();
+  const opReady = () => (!opCtl.adding || !!opCtl.commit()) && (!wireCtl.adding || !!wireCtl.commit()); // (a half-typed new wire too)
   // Inspection (Before) photos are found by serial later, so a blank serial gets one confirmation.
   const serialOk = async (v) => {
     if (mode !== 'add' || v.stage !== 'pre' || v.serialNumber) return true;
@@ -1182,6 +1256,7 @@ function renderForm(mode, id) {
       if (mode === 'edit') {
         const d = $('#fDate').value ? new Date($('#fDate').value).getTime() : p.createdAt;
         Object.assign(p, v, { updatedAt: Date.now() });
+        if (v.wire) rememberWire(v.wire);
         if (!isNaN(d) && d !== new Date(dtLocalValue(vals.createdAt)).getTime()) { p.createdAt = d; p.dateSource = 'manual'; }
         await putPhoto(p); markDirty('photos', p.id);
         toast('Saved');
@@ -1214,10 +1289,11 @@ async function saveQueued(v) {
   await putPhoto(p);
   S.photos.push(p);
   markDirty('photos', p.id);
-  S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, stage: v.stage, operator: v.operator };
+  S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, stage: v.stage, operator: v.operator, wire: v.wire };
   if (S.addInspect && S.inspection && v.serialNumber) S.inspection.serialNumber = v.serialNumber;
   if (v.operator) { rememberOperator(v.operator, true); if (S.addInspect && S.inspection) { S.inspection.operator = v.operator; drawInspBar(); } } // next photo: same operator
-  if (S.addInspect && S.inspection) { Object.assign(S.inspection, { rigId: v.rigId || '', customerId: v.customerId || '', pipeSpecId: v.pipeSpecId || '' }); drawInspBar(); } // next photo: what was just saved
+  if (v.wire) rememberWire(v.wire, true); // next job / photo: same wire
+  if (S.addInspect && S.inspection) { Object.assign(S.inspection, { rigId: v.rigId || '', customerId: v.customerId || '', pipeSpecId: v.pipeSpecId || '', wire: v.wire || '' }); drawInspBar(); } // next photo: what was just saved
   S.savedCount++;
   if (S.addInspect && S.inspection) S.inspection.count++;
   await setMeta('lastUsed', { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId });
@@ -1274,8 +1350,8 @@ async function handleFiles(fileList) {
   if (location.hash === '#/add') route(); else location.hash = '#/add';
 }
 
-/* ================= inspection session (Start inspection) ================= */
-// 🔍 Start inspection opens a small sheet: Operator (you), Rig name, Customer, Pipe spec, then 📷 Open camera. All are
+/* ================= inspection session (Start new job) ================= */
+// 🔍 Start new job (was "Start inspection") opens a small sheet: Operator (you), Rig name, Customer, Pipe spec, Wire, then 📷 Open camera. All are
 // native <select>s (Rig / Customer offer "＋ Add new…" at the top, which reveals a plain text box); no <datalist> anywhere (iOS
 // home-screen apps crashed moving between datalist fields). Rig is required and starts unselected; customer is
 // required and starts with the last-used one; pipe spec is one of the four below. "Open camera" is a
@@ -1340,19 +1416,21 @@ function startInspectionSheet() {
   const lu = S.meta.lastUsed || {};
   const def = (list.find((x) => x.id === lu.pipeSpecId) || list.find((x) => x.id === (specEntries(INSP_SPECS[2]).keep || {}).id) || list[0] || {}).id || '';
   const custDef = S.customers.has(lu.customerId) ? lu.customerId : '';
-  const m = openModal(`<h3>Start inspection</h3>
+  const m = openModal(`<h3>Start new job</h3>
     <form id="inspForm" autocomplete="off">
       ${opFieldHTML('inspOp', currentOperator(), { wrapId: 'inspOpField', label: 'Operator (you)' })}
       ${pickNewHTML('inspRigPick', 'rigs', '', '— Pick the rig —', 'Rig name', '＋ Add new rig…', 'Type the new rig name')}
       ${pickNewHTML('inspCustPick', 'customers', custDef, '— Pick the customer —', 'Customer', '＋ Add new customer…', 'Type the new customer name')}
       <div class="field"><label for="inspSpec">Pipe spec</label>
         <select id="inspSpec">${list.length ? list.map((x) => `<option value="${esc(x.id)}" ${x.id === def ? 'selected' : ''}>${esc(x.description)}</option>`).join('') : '<option value="">No pipe spec</option>'}</select></div>
+      ${wireFieldHTML('inspWire', currentWire(), { wrapId: 'inspWireField' })}
       <div class="stack form-actions">
         <label for="camInput" class="btn primary big block" id="inspCamBtn">📷 Open camera</label>
         <button type="button" class="btn ghost block" id="inspCancel">Cancel</button>
       </div>
     </form>`);
   const opCtl = bindOpField('inspOp', { onChange: (l) => { if (l) rememberOperator(l, true); } });
+  const wireCtl = bindWireField('inspWire');
   // Rig / Customer: what's chosen ({ id } or { name } for a new one), or null with the message to show.
   const pick = (id, what) => {
     const sel = $('#' + id, m), box = $('#' + id + 'New', m), msg = $('#' + id + 'Msg', m);
@@ -1379,17 +1457,20 @@ function startInspectionSheet() {
     const rig = pick('inspRigPick', 'rig'), cust = pick('inspCustPick', 'customer');
     const miss = [rig, cust].find((x) => x.msg);
     if (miss) { e.preventDefault(); miss.msg.textContent = miss.text; miss.el.focus(); return; }
+    const wire = wireCtl.adding ? wireCtl.commit() : wireCtl.value; // optional; a half-typed new wire is added
+    if (wireCtl.adding && !wire) { e.preventDefault(); return; }
     rememberOperator(op, true);
-    startInspection({ rig, cust, pipeSpecId: $('#inspSpec', m).value, operator: op });
+    if (wire) rememberWire(wire, true);
+    startInspection({ rig, cust, pipeSpecId: $('#inspSpec', m).value, operator: op, wire });
     setTimeout(() => closeModal(true), 0); // after the tap has opened the camera
   });
   $('#inspCancel', m).onclick = () => closeModal(true);
   $('#inspForm', m).onsubmit = (e) => e.preventDefault();
 }
-function startInspection({ rig, cust, pipeSpecId, operator }) {
+function startInspection({ rig, cust, pipeSpecId, operator, wire = '' }) {
   S.keepJoint = false;
   const sess = { workOrder: '', rigName: rig.name || labelOf('rigs', rig.id), rigId: rig.id || null, customerId: cust.id || '', pipeSpecId: S.pipeSpecs.has(pipeSpecId) ? pipeSpecId : '',
-    count: 0, operator: cleanOp(operator || '') };
+    count: 0, operator: cleanOp(operator || ''), wire: cleanWire(wire) };
   S.inspection = sess;
   drawInspBar();
   sess.ready = (async () => { // new rig / customer: looked up (any capitalisation) or added, after the camera has opened
@@ -1702,13 +1783,13 @@ async function exportZip() {
       try { await Sync.ensureBlob(need[i]); } catch (e) { /* skipped below */ }
     }
     let skippedFiles = 0;
-    const rows = [['file', 'id', 'taken', 'stage', 'operator', 'work_order', 'customer', 'rig', 'rig_notes', 'pipe_spec', 'serial_number', 'end', 'band', 'condition_notes', 'added']];
+    const rows = [['file', 'id', 'taken', 'stage', 'operator', 'work_order', 'wire', 'customer', 'rig', 'rig_notes', 'pipe_spec', 'serial_number', 'end', 'band', 'condition_notes', 'added']];
     const jsonPhotos = [];
     photos.forEach((p, i) => {
       const rig = S.rigs.get(p.rigId) || {};
       const path = `${safeName(labelOf('customers', p.customerId) || 'No customer')}/${safeName(rig.name || 'No rig')}/${exportFileName(p)}`;
       if (p.blob) zip.file(path, p.blob, { binary: true, date: new Date(p.createdAt) }); else skippedFiles++;
-      rows.push([path, p.id, isoLocal(p.createdAt), STAGES[stageOf(p)].label, cleanOp(p.operator), p.workOrder || '', labelOf('customers', p.customerId), rig.name || '', rig.notes || '', labelOf('pipeSpecs', p.pipeSpecId),
+      rows.push([path, p.id, isoLocal(p.createdAt), STAGES[stageOf(p)].label, cleanOp(p.operator), p.workOrder || '', p.wire || '', labelOf('customers', p.customerId), rig.name || '', rig.notes || '', labelOf('pipeSpecs', p.pipeSpecId),
         p.serialNumber || '', p.end || '', p.bandNumber || '', p.notes || '', p.addedAt ? isoLocal(p.addedAt) : '']);
       const { blob, thumb, ...meta } = p;
       jsonPhotos.push({ ...meta, stage: stageOf(p), file: path, customer: labelOf('customers', p.customerId), rig: rig.name || '', pipeSpec: labelOf('pipeSpecs', p.pipeSpecId) });
@@ -1831,7 +1912,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v19'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v20'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
@@ -1846,7 +1927,7 @@ const UPD_ASK = {
   photo: { title: 'You have an unsaved photo. Save it first, or update anyway?', cancel: 'Save it first' },
   edit: { title: 'You have unsaved photo changes. Save them first, or update anyway?', cancel: 'Save them first' },
   inspection: { title: 'An inspection is in progress. Finish it first, or update anyway?', cancel: 'Keep inspecting',
-    msg: 'Photos you already saved are kept either way. After the update, tap Start inspection again.' },
+    msg: 'Photos you already saved are kept either way. After the update, tap Start new job again.' },
 };
 const Upd = {
   reg: null, ready: '', dismissed: false, lastCheck: 0, minGap: 60000, checks: 0, sawControllerChange: false,
