@@ -111,6 +111,17 @@ itself within a few minutes after it's run. Until then, other phones see the rej
 Phones keep working before you run it: the work order typed on **Start inspection** stays with each photo on the
 phone and is uploaded by itself within a few minutes after it's run.
 
+### ▶ Then: Repair mid-stages on photos — run it once (after 002)
+Needed so Repair photos (*Repair* / *Plasma cut* / *Inlay* / *Preheat*) can sync. Until this runs they stay on the phone.
+1. **SQL Editor** → new, empty query.
+2. Paste this **one line** (ASCII single quotes only — iPhone smart quotes break it; Abby can paste if needed) and click **Run**:
+
+   alter table public.photos drop constraint if exists photos_stage_check; alter table public.photos add constraint photos_stage_check check (stage is null or stage in ('pre', 'repair', 'plasma', 'inlay', 'post', 'preheat')); notify pgrst, 'reload schema';
+
+   (Same statements are in `supabase/migrations/007_repair_stages.sql`.)
+3. It only widens the stage check; nothing is changed or deleted. Safe to run again. "Success" / a small stage count
+   table means it worked.
+
 ## 4. Create the team login
 1. In the left sidebar, click **Authentication**, then **Users**.
 2. Click **Add user**, then **Create new user**.

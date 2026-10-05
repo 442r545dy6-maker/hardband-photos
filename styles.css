@@ -195,6 +195,10 @@ textarea { min-height: 96px; resize: vertical; }
 /* BEFORE / AFTER stage badge (tiles, detail, saved screen) */
 .stage-badge { display: inline-block; padding: 1px 7px; border-radius: 6px; font-size: 12px; font-weight: 800; letter-spacing: .5px; line-height: 1.5; vertical-align: 2px; }
 .stage-badge.pre { background: var(--steel); color: #fff; }
+.stage-badge.repair { background: #c55f0a; color: #fff; }
+.stage-badge.plasma { background: #6a4c93; color: #fff; }
+.stage-badge.inlay { background: #0077b6; color: #fff; }
+.stage-badge.preheat { background: #b08900; color: #fff; }
 .stage-badge.post { background: var(--accent); color: #111; }
 .tile .stage-badge.on-tile { position: absolute; top: 4px; left: 4px; font-size: 11px; box-shadow: 0 1px 3px rgba(0,0,0,.35); }
 .stage-badge.big { font-size: 15px; padding: 2px 10px; }
@@ -223,9 +227,11 @@ textarea { min-height: 96px; resize: vertical; }
 }
 .seg button.on { background: var(--steel); border-color: var(--steel); color: #fff; }
 .seg.band button.on { background: var(--accent); border-color: var(--accent); color: #111; }
-/* stage toggle (Before hardband / After hardband) */
+/* stage toggle (Before / After; repair joints add Repair / Plasma cut / Inlay) */
+.seg.stage { flex-wrap: wrap; }
 .seg.stage button { min-height: 64px; line-height: 1.2; padding: 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; }
 .seg.stage button small { font-size: 14px; font-weight: 600; opacity: .85; }
+.seg.stage.multi-stages button, .seg.stage.repair-stages button { flex: 1 1 calc(33.33% - 8px); min-height: 52px; font-size: 14px; }
 /* Before-hardband (inspection) layout */
 .pre-head { margin-top: 12px; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--steel); }
 .pre-head-rig { font-weight: 700; }

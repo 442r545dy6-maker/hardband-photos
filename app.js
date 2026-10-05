@@ -100,10 +100,48 @@ const countUsing = (kind, id) => S.photos.filter((p) => p[KINDS[kind].ref] === i
 // Photos saved before this field existed (no stage) count as 'post'.
 const STAGES = {
   pre: { label: 'Before hardband (inspection)', short: 'Before', badge: 'BEFORE', words: 'before pre inspection' },
+  repair: { label: 'Repair', short: 'Repair', badge: 'REPAIR', words: 'repair' },
+  plasma: { label: 'Plasma cut', short: 'Plasma', badge: 'PLASMA', words: 'plasma cut' },
+  inlay: { label: 'Inlay', short: 'Inlay', badge: 'INLAY', words: 'inlay placed' },
   post: { label: 'After hardband', short: 'After', badge: 'AFTER', words: 'after post' },
+  preheat: { label: 'Preheat temp photo', short: 'Preheat', badge: 'PREHEAT', words: 'preheat temp temperature' },
 };
-const stageOf = (p) => (p && p.stage === 'pre' ? 'pre' : 'post');
+const STAGE_ORDER = ['pre', 'repair', 'plasma', 'inlay', 'post', 'preheat'];
+const REPAIR_MID = ['repair', 'plasma', 'inlay']; // Repair joints only; Preheat always sits after After
+const stageOf = (p) => (p && STAGES[p.stage] ? p.stage : 'post');
 const stageBadge = (p, extra = '') => `<span class="stage-badge ${stageOf(p)}${extra ? ' ' + extra : ''}">${STAGES[stageOf(p)].badge}</span>`;
+// Repair joint = exact notes chip token "Repair" (comma-split / trim). Reapply alone does not unlock mid-stages.
+const notesTokens = (notes) => String(notes || '').split(',').map((t) => t.trim()).filter(Boolean);
+const notesHasRepair = (notes) => notesTokens(notes).includes('Repair');
+function isRepairJoint(notes, serial, end) {
+  if (notesHasRepair(notes)) return true;
+  const k = serialKey(serial);
+  if (!k) return false;
+  const e = end || '';
+  return S.photos.some((x) => !x.deletedAt && serialKey(x.serialNumber) === k && (x.end || '') === e && notesHasRepair(x.notes));
+}
+function stageButtonsHTML(repair) {
+  // Always Before + After + Preheat. Repair joints insert Repair / Plasma cut / Inlay between Before and After.
+  const rows = repair
+    ? [['pre', '<span>Before hardband</span><small>(inspection)</small>'],
+       ['repair', '<span>Repair</span>'],
+       ['plasma', '<span>Plasma cut</span>'],
+       ['inlay', '<span>Inlay</span>'],
+       ['post', '<span>After hardband</span>'],
+       ['preheat', '<span>Preheat</span>']]
+    : [['pre', '<span>Before hardband</span><small>(inspection)</small>'],
+       ['post', '<span>After hardband</span>'],
+       ['preheat', '<span>Preheat</span>']];
+  return rows.map(([v, html]) => `<button type="button" data-v="${v}" role="radio">${html}</button>`).join('');
+}
+function folderStageSummary(list) {
+  const n = (st) => list.filter((p) => stageOf(p) === st).length;
+  const bits = [`${n('pre')} before`];
+  for (const st of REPAIR_MID) { const c = n(st); if (c) bits.push(`${c} ${st}`); }
+  bits.push(`${n('post')} after`);
+  if (n('preheat')) bits.push(`${n('preheat')} preheat`);
+  return `(${bits.join(' · ')})`;
+}
 
 /* ---------- operator: who did the work (part of every record) ----------
    Stored on the record as ONE text value "Name Number", e.g. "Dusty 104" (Supabase column photos.operator).
@@ -643,7 +681,7 @@ function renderHome() {
       <div><label for="fC">Customer</label><select id="fC">${opts('customers', s.customerId, 'Any customer')}</select></div>
       <div><label for="fR">Rig</label><select id="fR">${opts('rigs', s.rigId, 'Any rig')}</select></div>
       <div><label for="fE">End</label><select id="fE"><option value="">Box or Pin</option><option ${s.end === 'Box' ? 'selected' : ''}>Box</option><option ${s.end === 'Pin' ? 'selected' : ''}>Pin</option></select></div>
-      <div><label for="fS">Stage</label><select id="fS"><option value="">Any stage</option><option value="pre" ${s.stage === 'pre' ? 'selected' : ''}>Before</option><option value="post" ${s.stage === 'post' ? 'selected' : ''}>After</option></select></div>
+      <div><label for="fS">Stage</label><select id="fS"><option value="">Any stage</option><option value="pre" ${s.stage === 'pre' ? 'selected' : ''}>Before</option><option value="repair" ${s.stage === 'repair' ? 'selected' : ''}>Repair</option><option value="plasma" ${s.stage === 'plasma' ? 'selected' : ''}>Plasma cut</option><option value="inlay" ${s.stage === 'inlay' ? 'selected' : ''}>Inlay</option><option value="post" ${s.stage === 'post' ? 'selected' : ''}>After</option><option value="preheat" ${s.stage === 'preheat' ? 'selected' : ''}>Preheat</option></select></div>
       <div><label for="fFrom">From date</label><input id="fFrom" type="date" value="${esc(s.from)}"></div>
       <div><label for="fTo">To date</label><input id="fTo" type="date" value="${esc(s.to)}"></div>
       <button id="fClear" class="btn ghost full">Clear search &amp; filters</button>
@@ -730,7 +768,7 @@ const serialKey = (s) => String(s || '').replace(/\s+/g, '').toUpperCase();
 function jointGroups(list) {
   const m = new Map();
   for (const p of list) { const k = serialKey(p.serialNumber); if (!m.has(k)) m.set(k, []); m.get(k).push(p); }
-  const endOrd = { Box: 0, Pin: 1 }, stOrd = { pre: 0, post: 1 };
+  const endOrd = { Box: 0, Pin: 1 }, stOrd = { pre: 0, repair: 1, plasma: 2, inlay: 3, post: 4, preheat: 5 };
   const groups = [...m.entries()].map(([key, ps]) => ({ key, sn: ps.slice().sort((a, b) => b.createdAt - a.createdAt)[0].serialNumber || '',
     ps: ps.sort((a, b) => stOrd[stageOf(a)] - stOrd[stageOf(b)] || (endOrd[a.end] ?? 2) - (endOrd[b.end] ?? 2) || String(a.bandNumber).localeCompare(String(b.bandNumber)) || a.createdAt - b.createdAt), latest: Math.max(...ps.map((p) => p.createdAt)) }));
   return groups.sort((a, b) => b.latest - a.latest);
@@ -762,7 +800,7 @@ function renderFolder(ck, rk) {
       <div class="muted small">${esc(labelOf('customers', ck) || 'No customer')}</div>
       <div style="font-size:22px;font-weight:800" id="folderRigName">${esc(rig ? rig.name : 'No rig')}</div>
       ${rig && rig.notes ? `<div class="muted small" style="margin-top:4px">${esc(rig.notes)}</div>` : ''}
-      <div class="muted small" style="margin-top:6px">${list.length} photo${list.length === 1 ? '' : 's'} · ${groups.length} joint${groups.length === 1 ? '' : 's'}${list.length ? ` <span id="folderStages">(${list.filter((p) => stageOf(p) === 'pre').length} before · ${list.filter((p) => stageOf(p) === 'post').length} after)</span>` : ''}. New photos taken here go in this folder.</div>
+      <div class="muted small" style="margin-top:6px">${list.length} photo${list.length === 1 ? '' : 's'} · ${groups.length} joint${groups.length === 1 ? '' : 's'}${list.length ? ` <span id="folderStages">${folderStageSummary(list)}</span>` : ''}. New photos taken here go in this folder.</div>
       ${rig ? `<button class="btn ghost block" id="editRigBtn" style="margin-top:10px">✎ Rename / edit rig</button>` : ''}
     </div>
     ${list.length ? groups.map((g) => { const ch = g.key ? compareHash(g.ps.find((x) => stageOf(x) === 'post') || g.ps[0]) : ''; return `<div class="sn-head">${g.sn ? 'SN ' + esc(g.sn) : 'No serial number'} <span class="muted">(${g.ps.length})</span>${ch ? ` <a class="pair-mark" href="${ch}" title="Before and After photos — compare" aria-label="Compare Before / After">⇄</a>` : ''}</div>
@@ -968,11 +1006,19 @@ async function shareComparison(pre, post) {
 // The set shown depends on the stage: inspection before hardbanding, or the result after hardbanding.
 const CHIPS = {
   pre: ['No hardband needed', 'Reapply', 'Repair', 'Eccentric band'],
+  repair: [],
+  plasma: [],
+  inlay: [],
   post: ['Good', 'Rejected wire', 'Excessive porosity', 'Cracks', 'Needs repair', 'Eccentric band'],
+  preheat: [],
 };
 const NOTES_HINT = {
   pre: 'Inspection: band worn flush, height above OD, cracks…',
+  repair: 'Repair work in progress…',
+  plasma: 'Existing hardbanding removed, cut clean…',
+  inlay: 'Inlay seated, fit-up…',
   post: 'Wear, cracks, height above OD, rebuild needed…',
+  preheat: 'Preheat temp…',
 };
 function renderForm(mode, id) {
   let p = null, item = null, vals;
@@ -985,13 +1031,15 @@ function renderForm(mode, id) {
     item = S.queue[S.qIndex];
     if (!item) { location.hash = '#/'; return; }
     const lu = S.meta.lastUsed || {};
-    vals = { customerId: lu.customerId || '', rigId: lu.rigId || '', pipeSpecId: lu.pipeSpecId || '', serialNumber: '', end: '', bandNumber: '', notes: '', stage: S.meta.lastStage === 'pre' ? 'pre' : 'post', operator: currentOperator() };
+    vals = { customerId: lu.customerId || '', rigId: lu.rigId || '', pipeSpecId: lu.pipeSpecId || '', serialNumber: '', end: '', bandNumber: '', notes: '', stage: STAGES[S.meta.lastStage] ? S.meta.lastStage : 'post', operator: currentOperator() };
     if (S.addContext) Object.assign(vals, S.addContext);
     if (S.addKeep && S.lastSaved) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '', stage: stageOf(S.lastSaved) });
     if (S.batchValues) Object.assign(vals, { ...S.batchValues, bandNumber: '', notes: '' });
     if (S.addInspect) vals.stage = 'pre'; // inspection session: every new photo starts as Before hardband
     if (S.addInspect && S.addKeep && S.inspection && S.inspection.serialNumber) vals.serialNumber = S.inspection.serialNumber;
     if (S.addInspect && S.inspection && S.inspection.operator) vals.operator = S.inspection.operator;
+    // Repair mid-stages only on repair joints; otherwise fall back (inspection → Before, else After)
+    if (REPAIR_MID.includes(vals.stage) && !isRepairJoint(vals.notes, vals.serialNumber, vals.end)) vals.stage = S.addInspect ? 'pre' : 'post';
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
   }
   for (const [k, kind] of [['customerId', 'customers'], ['rigId', 'rigs'], ['pipeSpecId', 'pipeSpecs']]) if (vals[k] && !S[kind].has(vals[k])) vals[k] = '';
@@ -1004,9 +1052,7 @@ function renderForm(mode, id) {
     <img class="preview" src="${src}" alt="Photo preview">
     <p class="qinfo">${mode === 'add' ? `Taken ${fmtDate(item.createdAt)}${item.dateSource === 'exif' ? ' (from photo)' : ''}` : ''}</p>
     <form id="photoForm" class="card" autocomplete="off">
-      <div class="field stage-field"${mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0 ? ' hidden' : ''}><span class="lbl">Stage</span><div class="seg stage" id="fStage" role="radiogroup" aria-label="Stage">
-        <button type="button" data-v="pre" role="radio"><span>Before hardband</span><small>(inspection)</small></button>
-        <button type="button" data-v="post" role="radio"><span>After hardband</span></button></div></div>
+      <div class="field stage-field"${mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0 ? ' hidden' : ''}><span class="lbl">Stage</span><div class="seg stage multi-stages${isRepairJoint(vals.notes, vals.serialNumber, vals.end) ? ' repair-stages' : ''}" id="fStage" role="radiogroup" aria-label="Stage">${stageButtonsHTML(isRepairJoint(vals.notes, vals.serialNumber, vals.end))}</div></div>
       <div class="pre-head" id="preHead" hidden></div>
       <div id="mainFields">
       <div class="field" id="fldCustomer"><label for="fCustomer">Customer</label>${selectHTML('customers', 'customerId', 'fCustomer')}</div>
@@ -1049,8 +1095,9 @@ function renderForm(mode, id) {
   const drawStage = () => {
     $$('#fStage button').forEach((b) => { const on = b.dataset.v === stage; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
     const ch = $('#fChips'); ch.dataset.stage = stage;
-    ch.innerHTML = CHIPS[stage].map((c) => `<button type="button" data-chip="${esc(c)}">${esc(c)}</button>`).join('');
-    $('#fNotes').placeholder = NOTES_HINT[stage];
+    ch.innerHTML = (CHIPS[stage] || []).map((c) => `<button type="button" data-chip="${esc(c)}">${esc(c)}</button>`).join('');
+    $('#fNotes').placeholder = NOTES_HINT[stage] || '';
+    // Only `pre` uses the Before inspection layout; repair/plasma/inlay/preheat use the full (post) layout.
     const pre = stage === 'pre', main = $('#mainFields'), more = $('#moreFields');
     const order = pre ? ['Serial', 'PreChips', 'End'] : ['Customer', 'Rig', 'Operator', 'Spec', 'Serial', 'End', 'Band', 'Notes', 'Date'];
     order.map(fld).filter(Boolean).forEach((el) => main.appendChild(el));
@@ -1060,14 +1107,28 @@ function renderForm(mode, id) {
     if (pre) drawHead();
     peekNotes();
   };
-  drawStage();
+  // Rebuild the Stage button set when Repair is marked/cleared (or serial/end match a repair joint).
+  const syncRepairStages = () => {
+    const repair = isRepairJoint($('#fNotes').value, $('#fSerial').value, end);
+    const box = $('#fStage');
+    const want = repair ? 'pre,repair,plasma,inlay,post,preheat' : 'pre,post,preheat';
+    const have = [...box.querySelectorAll('button')].map((b) => b.dataset.v).join(',');
+    if (REPAIR_MID.includes(stage) && !repair) stage = (mode === 'add' && S.addInspect) ? 'pre' : 'post';
+    if (have !== want) {
+      box.innerHTML = stageButtonsHTML(repair);
+      box.classList.add('multi-stages'); box.classList.toggle('repair-stages', repair);
+    }
+    drawStage();
+  };
+  syncRepairStages();
   $('#fStage').onclick = (e) => {
     const b = e.target.closest('button'); if (!b || b.dataset.v === stage) return;
     stage = b.dataset.v; drawStage();
     if (stage === 'pre' && !$('#fSerial').value) $('#fSerial').focus();
   };
   $('#fRig').addEventListener('change', () => { if (stage === 'pre') drawHead(); });
-  $('#fNotes').addEventListener('input', peekNotes);
+  $('#fNotes').addEventListener('input', () => { peekNotes(); syncRepairStages(); });
+  $('#fSerial').addEventListener('input', syncRepairStages);
   $('#moreBox').addEventListener('toggle', peekNotes);
   if (stage === 'pre' && mode === 'add' && !vals.serialNumber) setTimeout(() => { if ($('#fSerial') && !$('#modalRoot').innerHTML) $('#fSerial').focus({ preventScroll: true }); }, 60);
   const drawSeg = () => {
@@ -1078,13 +1139,14 @@ function renderForm(mode, id) {
     $('#bandHint').textContent = end === 'Pin' ? 'Pin has 2 bands.' : end === 'Box' ? 'Box has 3 bands.' : 'Box has 3 bands, Pin has 2. Pick an end first.';
   };
   drawSeg();
-  $('#fEnd').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; const was = end; end = b.dataset.v; if ((end === 'Pin' || end === 'Box') && was !== end) band = 'All'; drawSeg(); };
+  $('#fEnd').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; const was = end; end = b.dataset.v; if ((end === 'Pin' || end === 'Box') && was !== end) band = 'All'; drawSeg(); syncRepairStages(); };
   $('#fBand').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; band = band === b.dataset.v ? '' : b.dataset.v; drawSeg(); };
   $('.chips').onclick = (e) => {
     const c = e.target.closest('[data-chip]'); if (!c) return;
     const ta = $('#fNotes'); const cur = ta.value.trim();
     ta.value = cur ? `${cur}${/[.,;]$/.test(cur) ? '' : ','} ${c.dataset.chip}` : c.dataset.chip;
     peekNotes();
+    syncRepairStages();
   };
   $$('select[data-kind]').forEach((sel) => {
     let prevVal = sel.value;
@@ -1769,7 +1831,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v18'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v19'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {

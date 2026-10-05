@@ -16,6 +16,8 @@ optionally, in a **shared team library** (Supabase), so the whole crew sees the 
   One line, no quote characters (like 006)
 - `supabase/migrations/006_photo_work_order.sql`: adds `photos.work_order` (Work order # from Start inspection, v13–v15; optional since hbp-v16). One
   line, no quote characters, so it survives iPhone smart quotes
+- `supabase/migrations/007_repair_stages.sql`: widens `photos_stage_check` so Repair mid-stages (`repair`, `plasma`, `inlay`, `preheat`)
+  sync. File + ASCII one-liner for Dusty's iPhone (smart quotes break SQL — Abby may need to paste)
 - `SUPABASE_SETUP.md`: click-by-click setup for a non-developer
 - `manifest.webmanifest`, `sw.js`: installable + offline app shell (bump `VERSION` in sw.js **and** `APP_VERSION` in
   app.js, to the same value, when files change; the test suite checks they match)
@@ -24,14 +26,24 @@ optionally, in a **shared team library** (Supabase), so the whole crew sees the 
   crop). Regenerate with `python3 make_icons.py` (`--from new-crop.png` replaces the source first), then bump both versions
 - `screenshots/`: mobile screenshots from the automated test
 
-## Before / After hardband stage
-Every photo has a stage: `pre` = taken during inspection **before** hardbanding, `post` = **after** hardbanding.
-Photos saved before this existed have no stage and count as `post`.
+## Before / After hardband stage (and Repair mid-stages)
+Every photo has a stage: `pre` = **before** hardbanding, `post` = **after** hardbanding. Photos saved before this
+existed have no stage and count as `post`.
+- **Repair joints** (notes chip token `Repair`, or another non-deleted photo with the same serial + end already marked
+  Repair) unlock three extra stages between Before and After, in order: `repair` (*Repair*), `plasma` (*Plasma cut*),
+  `inlay` (*Inlay*). Every hardbanded joint: Before → After → Preheat. Repair joints: Before → Repair → Plasma cut →
+  Inlay → After → Preheat. Reapply / re-hardband (not Repair): Before → After → Preheat only. Tapping or clearing the Repair
+  notes chip redraws the Stage buttons immediately. Mid-stages use the full After form layout (not the Before
+  inspection layout). Compare ⇄ still pairs only Before vs After.
 - The photo form starts with a two-button toggle, *Before hardband (inspection)* / *After hardband*, defaulting to the
-  stage used last. After hardband is the original full form with the condition chips Good, Rejected wire, Excessive
-  porosity, Cracks, Needs repair, Eccentric band. Before hardband is a short inspection screen: rig + "Before hardband"
-  header, serial number (focused), chips No hardband needed / Reapply / Repair / Eccentric band, and everything else under
-  *More details*. Switching stage never clears typed notes (chips only add text to the notes).
+  stage used last (a repair-only last stage falls back to After on a non-repair joint). After hardband is the original
+  full form with the condition chips Good, Rejected wire, Excessive porosity, Cracks, Needs repair, Eccentric band.
+  Before hardband is a short inspection screen: rig + "Before hardband" header, serial number (focused), chips No
+  hardband needed / Reapply / Repair / Eccentric band, and everything else under *More details*. Switching stage never
+  clears typed notes (chips only add text to the notes).
+- Team sync needs `007_repair_stages.sql` (widen `photos_stage_check` to allow `pre`/`repair`/`plasma`/`inlay`/`post`/`preheat`).
+  Until Dusty runs it, repair mid-stages stay on the phone (IndexedDB) and uploads of those keys are rejected by the
+  old check.
 - **🔍 Start inspection** (home screen): a sheet with, in this order, **Operator (you)** (the saved-operator picker,
   required, *＋ Add new operator…* inline), **Rig name**, **Customer** and **Pipe spec**, then **📷 Open camera**. All
   are native `<select>`s (no `<datalist>` anywhere in the app: iOS home-screen apps crashed on one):

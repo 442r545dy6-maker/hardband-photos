@@ -64,7 +64,7 @@ function photoToRow(p) {
     width: p.width || null, height: p.height || null, orig_name: p.origName || null,
     image_path: p.remoteImage ? `photos/${p.id}.jpg` : null, thumb_path: p.remoteThumb ? `thumbs/${p.id}.jpg` : null,
     client_updated_at: Math.round(stampOf('photos', p)) || 0, deleted_at: tsIso(p.deletedAt), updated_by_name: S.meta.syncName || null,
-    stage: p.stage === 'pre' ? 'pre' : 'post', // 'pre' = before hardband (inspection); photos without a stage count as 'post'
+    stage: (p.stage === 'pre' || p.stage === 'repair' || p.stage === 'plasma' || p.stage === 'inlay' || p.stage === 'post' || p.stage === 'preheat') ? p.stage : 'post', // known keys pass through; missing/unknown → post
     operator: String(p.operator || '').trim().replace(/\s+/g, ' ') || null, // "Name Number", e.g. "Dusty 104" (migration 003)
     work_order: String(p.workOrder || '').trim() || null, // Work order # from Start inspection (migration 006)
   };
@@ -80,7 +80,7 @@ function applyPhotoRow(p, r) {
   if (r.added_at) p.addedAt = tsMs(r.added_at);
   // Only a real value changes the stage. A missing/null stage (server not migrated yet, or a row written by an
   // older app version) keeps whatever this phone already has; photos with no stage at all count as 'post'.
-  if (r.stage === 'pre' || r.stage === 'post') p.stage = r.stage;
+  if (r.stage === 'pre' || r.stage === 'repair' || r.stage === 'plasma' || r.stage === 'inlay' || r.stage === 'post' || r.stage === 'preheat') p.stage = r.stage;
   // Operator: a real value always wins. An empty one clears it, except while this phone still has to upload its
   // operator (it was saved before the server had the column) — then the local value is kept until the catch-up.
   // No 'operator' key at all = server not migrated yet: keep what this phone has.
@@ -536,9 +536,13 @@ const Sync = {
     try { await sbFetch('/rest/v1/photos?select=id,stage&limit=1'); }
     catch (e) { if (isNoStageCol(e)) { this.stageCol = false; return false; } throw e; }
     this.stageCol = true;
-    const by = { pre: [], post: [] };
-    for (const id of backlog) { const p = await photoRecord(id); if (p) by[p.stage === 'pre' ? 'pre' : 'post'].push(id); }
-    for (const st of ['pre', 'post']) {
+    const by = { pre: [], repair: [], plasma: [], inlay: [], post: [], preheat: [] };
+    for (const id of backlog) {
+      const p = await photoRecord(id); if (!p) continue;
+      const st = (p.stage === 'pre' || p.stage === 'repair' || p.stage === 'plasma' || p.stage === 'inlay' || p.stage === 'preheat') ? p.stage : 'post';
+      by[st].push(id);
+    }
+    for (const st of ['pre', 'repair', 'plasma', 'inlay', 'post', 'preheat']) {
       for (let i = 0; i < by[st].length; i += 100) {
         const ids = by[st].slice(i, i + 100).map((x) => `"${String(x).replace(/["\\]/g, '')}"`).join(',');
         await sbFetch(`/rest/v1/photos?id=in.(${encodeURIComponent(ids)})&stage=is.null`, { method: 'PATCH', body: JSON.stringify({ stage: st }),

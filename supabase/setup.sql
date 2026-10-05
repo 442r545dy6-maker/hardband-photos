@@ -85,17 +85,13 @@ create table if not exists public.photos (
   updated_by_name   text
 );
 
--- ---------- migration 002: photo stage (Before / After hardband) ----------
--- 'pre' = inspection photo BEFORE hardbanding, 'post' = AFTER hardbanding, null = older photo (app treats as 'post').
--- Same as supabase/migrations/002_stage.sql; covered by the grants/policies below like every other column.
+-- ---------- migration 002 + 007: photo stage (Before / repair mids / After) ----------
+-- 'pre' = Before hardband, 'repair'/'plasma'/'inlay' = Repair mid-stages, 'preheat' = Preheat temp photo, 'post' = After hardband,
+-- null = older photo (app treats as 'post'). Same as 002_stage.sql + 007_repair_stages.sql.
 alter table public.photos add column if not exists stage text;
-do $$
-begin
-  if not exists (select 1 from pg_constraint
-                 where conname = 'photos_stage_check' and conrelid = 'public.photos'::regclass) then
-    alter table public.photos add constraint photos_stage_check check (stage is null or stage in ('pre', 'post'));
-  end if;
-end $$;
+alter table public.photos drop constraint if exists photos_stage_check;
+alter table public.photos add constraint photos_stage_check
+  check (stage is null or stage in ('pre', 'repair', 'plasma', 'inlay', 'post', 'preheat'));
 
 -- ---------- migration 003: operator (who did the work) ----------
 -- 'Name Number', e.g. 'Dusty 104'; null = no operator. Same as supabase/migrations/003_operator.sql.
