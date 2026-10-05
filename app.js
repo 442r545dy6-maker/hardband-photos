@@ -1139,10 +1139,12 @@ function renderForm(mode, id) {
     // Joint order: Before → Preheat → After. New joint / Next photo (keep=0) → Before.
     // forceStage (from saved CTA data-stage) wins over lastSaved races so After photo always opens After.
     const forced = S.forceStage; S.forceStage = null;
-    if (forced && STAGES[forced]) vals.stage = forced;
+    if (forced && STAGES[forced]) { vals.stage = forced; if (S.lastSaved) S.addKeep = true; }
     else if (S.addKeep && S.lastSaved && stageOf(S.lastSaved) === 'pre') vals.stage = 'preheat';
     else if (S.addKeep && S.lastSaved && stageOf(S.lastSaved) === 'preheat') vals.stage = 'post';
     else if (!S.addKeep) vals.stage = 'pre';
+    // Re-apply Same-joint carry if forceStage just restored addKeep (after a wiped pendingKeep race).
+    if (S.addKeep && S.lastSaved && forced && STAGES[forced]) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '', bandNumber: S.lastSaved.bandNumber || '', notes: S.lastSaved.notes || '', operator: cleanOp(S.lastSaved.operator) || currentOperator(), wire: cleanWire(S.lastSaved.wire) || currentWire(), stage: forced });
     // Never trap on a second picture-only Preheat for the same joint — advance to After.
     if (vals.stage === 'preheat' && vals.serialNumber && jointHasStage(vals.serialNumber, 'preheat')) vals.stage = 'post';
     if (S.addInspect && S.addKeep && S.inspection && S.inspection.serialNumber) vals.serialNumber = S.inspection.serialNumber;
@@ -1394,8 +1396,9 @@ function renderSaved() {
         if (st === 'pre' && sn) return `<label for="camInput" class="btn primary big block" data-keep="1" data-stage="preheat" id="nextPhotoBtn">📷 Preheat photo (SN ${esc(sn)})</label>
       <label for="camInput" class="btn secondary block" data-keep="0" id="nextJointBtn">📷 Next joint</label>`;
         // After Preheat+SN: primary = After for that joint (force post — do not re-open Preheat).
-        if (st === 'preheat' && sn) return `<label for="camInput" class="btn primary big block" data-keep="1" data-stage="post" id="nextPhotoBtn">📷 After photo (SN ${esc(sn)})</label>
-      <label for="camInput" class="btn secondary block" data-keep="0" id="nextJointBtn">📷 Next joint</label>`;
+        if (st === 'preheat' && sn) return `<p class="muted small" id="savedNextHint">Next: After hardband photo for SN ${esc(sn)}</p>
+      <label for="camInput" class="btn primary big block" data-keep="1" data-stage="post" id="nextPhotoBtn">📷 After photo (SN ${esc(sn)})</label>
+      <label for="camInput" class="btn ghost block" data-keep="0" id="nextJointBtn">Next joint</label>`;
         // Before without serial: keep a Next photo path so he isn't stuck.
         if (st === 'pre') return `<label for="camInput" class="btn primary big block" data-keep="0" id="nextPhotoBtn">📷 Next photo</label>`;
         // After / repair mids: Same joint keeps SN.
@@ -1422,8 +1425,10 @@ async function handleFiles(fileList) {
   const inSession = !!(S.inspection && S.inspection.rigId);
   const addCtx = inSession ? { rigId: S.inspection.rigId, customerId: S.inspection.customerId, ...(S.inspection.pipeSpecId ? { pipeSpecId: S.inspection.pipeSpecId } : {}) } : S.context ? { ...S.context } : null;
   // Prefer durable pendingKeep (armed on CTA pointerdown) over keepJoint — route()/camBtn can clear the latter before change fires.
-  const keep = (S.pendingKeep != null) ? !!S.pendingKeep : !!S.keepJoint;
+  // data-stage CTAs (Preheat / After) are always Same-joint; if stage was armed, force keep even if a late camBtn click wiped pendingKeep.
+  let keep = (S.pendingKeep != null) ? !!S.pendingKeep : !!S.keepJoint;
   const force = S.pendingStage;
+  if (force && STAGES[force]) keep = true;
   S.pendingKeep = null; S.pendingStage = null; S.keepJoint = false;
   const b = busy(files.length > 1 ? `Preparing 1 of ${files.length}…` : 'Preparing photo…');
   const q = []; let failed = 0;
@@ -1965,11 +1970,18 @@ async function init() {
   $('#backupBtn').onclick = () => { location.hash = '#/backup'; };
   $('#syncBadge').onclick = () => { location.hash = '#/backup'; };
   $('#manageBtn').onclick = () => { location.hash = '#/manage/' + S.manageTab; };
-  $('#camBtn').addEventListener('click', () => { S.keepJoint = false; S.pendingKeep = false; S.pendingStage = null; });
+  // Bottom-bar / library = fresh capture. Arm on pointerdown/touchstart only — NOT click.
+  // click can be synthesized when another <label for="camInput"> (After photo CTA) activates the same input,
+  // which used to wipe pendingKeep/pendingStage and turn After into Next joint (D7 / HP 249).
+  const armFreshCapture = () => { S.keepJoint = false; S.pendingKeep = false; S.pendingStage = null; };
+  for (const id of ['#camBtn', '#libBtn']) {
+    const el = $(id);
+    el.addEventListener('pointerdown', armFreshCapture);
+    el.addEventListener('touchstart', armFreshCapture, { passive: true });
+  }
   $('#inspBtn').onclick = startInspectionSheet;
   document.addEventListener('click', (e) => { const b = e.target.closest('[data-op-filter]'); if (!b) return; e.preventDefault(); applyOperatorFilter(b.dataset.opFilter === '__none' ? '__none' : b.dataset.opFilter); });
   $('#inspDone').onclick = () => finishInspection();
-  $('#libBtn').addEventListener('click', () => { S.keepJoint = false; S.pendingKeep = false; S.pendingStage = null; });
   for (const id of ['#camInput', '#libInput']) {
     const inp = $(id);
     inp.addEventListener('change', () => { const f = Array.from(inp.files || []); inp.value = ''; handleFiles(f); });
@@ -2000,7 +2012,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v23'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v24'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
