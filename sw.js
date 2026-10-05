@@ -1,5 +1,5 @@
 /* Hardband Photos service worker: caches the app shell so the app opens offline.
-   Bump VERSION whenever app files change so phones pick up the new copy. */
+   Bump VERSION whenever app files change so phones pick up the new copy. build: v23-notes-focus */
 const VERSION = 'hbp-v23';
 const SHELL = [
   './',

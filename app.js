@@ -1265,8 +1265,11 @@ function renderForm(mode, id) {
     if (stage === 'pre' && !$('#fSerial').value) $('#fSerial').focus();
   };
   $('#fRig').addEventListener('change', () => { if (stage === 'pre') drawHead(); });
-  $('#fNotes').addEventListener('input', () => { peekNotes(); syncRepairStages(); });
-  // Serial: never syncRepairStages on input — appendChild/redraw blurs iOS keyboard. Blur + change only.
+  // Notes peek is text-only (safe on input). syncRepairStages reparents via appendChild and blurs iOS — blur/change only.
+  $('#fNotes').addEventListener('input', peekNotes);
+  $('#fNotes').addEventListener('blur', syncRepairStages);
+  $('#fNotes').addEventListener('change', syncRepairStages);
+  // Serial: never syncRepairStages on input — same iOS blur. Blur + change only.
   $('#fSerial').addEventListener('blur', syncRepairStages);
   $('#fSerial').addEventListener('change', syncRepairStages);
   $('#moreBox').addEventListener('toggle', peekNotes);
