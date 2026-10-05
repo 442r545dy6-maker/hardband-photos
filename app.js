@@ -1106,7 +1106,11 @@ function renderForm(mode, id) {
     if (S.addContext) Object.assign(vals, S.addContext);
     if (S.addKeep && S.lastSaved) Object.assign(vals, { customerId: S.lastSaved.customerId, rigId: S.lastSaved.rigId, pipeSpecId: S.lastSaved.pipeSpecId, serialNumber: S.lastSaved.serialNumber || '', end: S.lastSaved.end || '', stage: stageOf(S.lastSaved) });
     if (S.batchValues) Object.assign(vals, { ...S.batchValues, bandNumber: '', notes: '' });
-    if (S.addInspect) vals.stage = 'pre'; // inspection session: every new photo starts as Before hardband
+    // Job session stage defaults (keep/lastSaved already applied above; Same-joint→After must win):
+    // first photo → Before; Same joint after Before → After; Next photo/joint → Before again.
+    if (S.addInspect && S.addKeep && S.lastSaved && stageOf(S.lastSaved) === 'pre') vals.stage = 'post';
+    else if (S.addInspect && S.inspection && S.inspection.count === 0) vals.stage = 'pre';
+    else if (S.addInspect && !S.addKeep && S.inspection && S.inspection.count > 0) vals.stage = 'pre';
     if (S.addInspect && S.addKeep && S.inspection && S.inspection.serialNumber) vals.serialNumber = S.inspection.serialNumber;
     if (S.addInspect && S.inspection && S.inspection.operator) vals.operator = S.inspection.operator;
     if (S.addInspect && S.inspection) vals.wire = S.inspection.wire || ''; // the job's wire (Start new job / last photo)
@@ -1912,7 +1916,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v20'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v21'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
