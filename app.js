@@ -84,7 +84,7 @@ const S = {
   gone: { rigs: new Map(), customers: new Map(), pipeSpecs: new Map() }, // deleted/merged entries (team sync tombstones)
   search: { q: '', customerId: '', rigId: '', end: '', stage: '', op: '', from: '', to: '' }, showFilters: false,
   queue: [], qIndex: 0, savedCount: 0, batchValues: null, lastSaved: null, keepJoint: false,
-  pendingKeep: null, pendingStage: null, forceStage: null, // durable Same-joint intent until handleFiles consumes it
+  pendingKeep: null, pendingStage: null, forceStage: null, keepFrom: null, addFromDetail: false, addDetailStage: null, // durable Same-joint intent until handleFiles consumes it
   context: null, addContext: null, lastListHash: '#/', lastList: [], manageTab: 'rigs',
   viewUrls: [], scroll: {}, modalCancel: null,
   inspection: null, addInspect: false, // inspection session: { workOrder, rigName, rigId, customerId, pipeSpecId, operator, count, ready }
@@ -180,13 +180,38 @@ function jointHasStage(serial, st) {
   if (!k) return false;
   return S.photos.some((x) => !x.deletedAt && serialKey(x.serialNumber) === k && stageOf(x) === st);
 }
-/** Arm Same-joint / Next-joint intent from a saved-screen CTA. Survives route()/camBtn races until handleFiles. */
+/** Stages already photographed for one joint (serial + end, non-deleted). */
+function jointStageSet(serial, end) {
+  const k = serialKey(serial), e = end || '', set = new Set();
+  if (!k) return set;
+  for (const x of S.photos) if (!x.deletedAt && serialKey(x.serialNumber) === k && (x.end || '') === e) set.add(stageOf(x));
+  return set;
+}
+/** First stage after `st` in the joint's work order that has no photo yet (null if none). */
+function nextMissingStage(st, repair, have) {
+  const seq = repair ? REPAIR_SEQ : PLAIN_SEQ;
+  let i = seq.indexOf(st);
+  if (i < 0) i = st === 'preheat' ? seq.indexOf('post') - 1 : -1;
+  for (let j = i + 1; j < seq.length; j++) if (!have.has(seq[j])) return seq[j];
+  return null;
+}
+// Notes chip already in the notes? (comma token, case-insensitive; Repair chip also matches the leading-word form
+// "Repair  Defender…"). Tapping a present chip again is a no-op — never "Repair, Repair".
+function notesHasChip(notes, chip) {
+  const c = String(chip || '').trim().toLowerCase();
+  if (!c) return false;
+  if (notesTokens(notes).some((t) => t.toLowerCase() === c)) return true;
+  return c === 'repair' && notesHasRepair(notes);
+}
+/** Arm Same-joint / Next-joint intent from a saved-screen CTA. Survives route()/camBtn races until handleFiles.
+ *  Photo-detail CTAs carry data-from=<photo id>: the new photo copies that photo's metadata instead of S.lastSaved. */
 function armKeepFromEl(el) {
   if (!el || !el.hasAttribute || !el.hasAttribute('data-keep')) return;
   S.pendingKeep = el.dataset.keep === '1';
   S.keepJoint = !!S.pendingKeep;
   const st = el.dataset.stage;
   S.pendingStage = (st && STAGES[st]) ? st : null;
+  S.keepFrom = (S.pendingKeep && el.dataset.from) ? el.dataset.from : null;
 }
 function folderStageSummary(list) {
   const n = (st) => list.filter((p) => stageOf(p) === st).length;
@@ -957,6 +982,7 @@ function renderPhoto(id) {
   setChrome({ title: p.serialNumber ? `SN ${p.serialNumber}` : 'Photo', back: S.lastListHash && S.lastListHash !== location.hash ? S.lastListHash : folderHash, bottom: false });
   const rig = S.rigs.get(p.rigId) || {};
   const canShare = !!(navigator.canShare && window.File);
+  const capHTML = detailCaptureHTML(p);
   view.innerHTML = `
     <img class="detail-img" id="detailImg" src="${p.blob ? viewUrl(p.blob) : p.thumb ? viewUrl(p.thumb) : ''}" alt="Hardband photo">
     ${p.blob ? '' : `<p class="muted small" id="fullNote" style="text-align:center">Loading full-size photo…</p>`}
@@ -982,11 +1008,19 @@ function renderPhoto(id) {
     </div>
     <div class="stack form-actions">
       ${compareHash(p) ? `<a class="btn secondary block" id="compareBtn" href="${compareHash(p)}">⇄ Compare Before / After</a>` : ''}
-      <a class="btn primary big block" id="editBtn" href="#/edit/${encodeURIComponent(p.id)}">✎ Edit details / move</a>
+      ${capHTML}
+      <a class="btn ${capHTML ? 'secondary' : 'primary big'} block" id="editBtn" href="#/edit/${encodeURIComponent(p.id)}">✎ Edit details / move</a>
       ${canShare ? '<button class="btn secondary block" id="shareBtn">⇪ Share / save to Photos</button>' : ''}
       <a class="btn ghost block" href="${folderHash}">📁 Open folder</a>
       <button class="btn danger block" id="delBtn">🗑 Delete photo</button>
     </div>`;
+  // Same arming as the Saved-screen CTAs (pointerdown/touchstart fire before the camera sheet steals the page).
+  $$('#detailCapture [data-keep]').forEach((l) => {
+    const arm = () => armKeepFromEl(l);
+    l.addEventListener('pointerdown', arm);
+    l.addEventListener('touchstart', arm, { passive: true });
+    l.addEventListener('click', arm);
+  });
   if (!p.blob) {
     Sync.ensureBlob(p).then((b) => {
       if (location.hash !== `#/photo/${encodeURIComponent(p.id)}`) return;
@@ -1011,6 +1045,31 @@ function renderPhoto(id) {
     toast('Photo deleted');
     location.hash = folderPhotos(p.customerId, p.rigId).length ? folderHash : '#/';
   };
+}
+
+// Photo detail: camera buttons for this joint's missing stages (hbp-v27). Changing Stage in Edit only relabels the photo,
+// and the bottom Take Photo bar is hidden here, so this is the capture path from a saved photo (D13 / HP 249).
+// Repairs are done in BATCHES (Befores on every joint, then all plasma cuts, then inlays, then Afters), so every stage the
+// joint (same serial + end, non-deleted photos) has no photo of yet gets a button — not just "next after this photo".
+//   repair joint: Repair → Plasma cut → Inlay → After (Plasma cut prominent while missing)
+//   normal joint: Before → Preheat → After
+// Each button copies the joint's details from photo p (data-from) and forces its stage; nothing depends on S.lastSaved.
+function jointMissingStages(p) {
+  if (!p || !p.serialNumber) return [];
+  const repair = isRepairJoint(p.notes, p.serialNumber, p.end), have = jointStageSet(p.serialNumber, p.end);
+  return (repair ? ['repair', 'plasma', 'inlay', 'post'] : PLAIN_SEQ).filter((st) => !have.has(st));
+}
+const CAP_ID = { pre: 'Pre', preheat: 'Preheat', repair: 'Repair', plasma: 'Plasma', inlay: 'Inlay', post: 'After' };
+const CAP_NAME = { pre: 'Before', preheat: 'Preheat', repair: 'Repair', plasma: 'Plasma cut', inlay: 'Inlay', post: 'After' };
+function jointCaptureButtons(p, prefix) {
+  const list = jointMissingStages(p);
+  if (!list.length) return '';
+  const snTxt = ` (SN ${esc(p.serialNumber)})`, primary = list.includes('plasma') ? 'plasma' : list[0];
+  return list.map((stg) => `<label for="camInput" class="btn ${stg === primary ? 'primary big' : 'secondary'} block" data-keep="1" data-stage="${stg}" data-from="${esc(p.id)}" id="${prefix}${CAP_ID[stg]}Btn">${stg === 'plasma' ? '🔥' : '📷'} ${esc(CAP_NAME[stg])} photo${snTxt}</label>`).join('');
+}
+function detailCaptureHTML(p) {
+  const btns = jointCaptureButtons(p, 'detail');
+  return btns ? `<div class="stack" id="detailCapture"><p class="muted small" id="detailNextHint">Take a picture for this joint:</p>${btns}</div>` : '';
 }
 
 /* ================= Before / After comparison ================= */
@@ -1179,6 +1238,7 @@ function renderForm(mode, id) {
     // New joint / Next photo (keep=0) → Before. Same joint → next stage in that joint's order (After stays After).
     // forceStage (from saved CTA data-stage) wins over lastSaved races so After photo always opens After.
     const forced = S.forceStage; S.forceStage = null;
+    const fromDetail = S.addFromDetail; // photo-detail CTA: S.lastSaved = the viewed photo, stage = S.addDetailStage
     if (forced && STAGES[forced]) { vals.stage = forced; if (S.lastSaved) S.addKeep = true; }
     else if (S.addKeep && S.lastSaved) { const ls = S.lastSaved, nx = nextStage(stageOf(ls), isRepairJoint(ls.notes, ls.serialNumber, ls.end)); if (nx) vals.stage = nx; }
     else if (!S.addKeep) vals.stage = 'pre';
@@ -1188,13 +1248,23 @@ function renderForm(mode, id) {
     if (vals.stage === 'preheat' && vals.serialNumber && jointHasStage(vals.serialNumber, 'preheat')) vals.stage = 'post';
     // Repair joints never get a new Preheat photo (no preheat before plasma cutting) — go to the next repair step.
     if (vals.stage === 'preheat' && isRepairJoint(vals.notes, vals.serialNumber, vals.end)) vals.stage = 'post';
-    if (S.addInspect && S.addKeep && S.inspection && S.inspection.serialNumber) vals.serialNumber = S.inspection.serialNumber;
-    if (S.addInspect && S.inspection && S.inspection.operator) vals.operator = S.inspection.operator;
-    if (S.addInspect && S.inspection) vals.wire = S.inspection.wire || ''; // the job's wire (Start new job / last photo)
+    // Never default to a second Repair / Plasma cut / Inlay photo for a joint that already has one — next missing step.
+    if (REPAIR_MID.includes(vals.stage) && vals.serialNumber && isRepairJoint(vals.notes, vals.serialNumber, vals.end)) {
+      const have = jointStageSet(vals.serialNumber, vals.end);
+      if (have.has(vals.stage)) vals.stage = nextMissingStage(vals.stage, true, have) || 'post';
+    }
+    // A photo-detail CTA copies everything from the viewed photo; the job session must not swap its SN / operator / wire.
+    if (!fromDetail) {
+      if (S.addInspect && S.addKeep && S.inspection && S.inspection.serialNumber) vals.serialNumber = S.inspection.serialNumber;
+      if (S.addInspect && S.inspection && S.inspection.operator) vals.operator = S.inspection.operator;
+      if (S.addInspect && S.inspection) vals.wire = S.inspection.wire || ''; // the job's wire (Start new job / last photo)
+    }
     // Repair mid-stages only on repair joints; otherwise fall back (inspection → Before, else After)
     if (REPAIR_MID.includes(vals.stage) && !isRepairJoint(vals.notes, vals.serialNumber, vals.end)) vals.stage = S.addInspect ? 'pre' : 'post';
     // Pipe spec = the job's spec (session sheet, else this rig's last saved photo), never a stale last-used from another rig.
-    { const js = jobSpec(vals.rigId, vals.customerId); if (js) vals.pipeSpecId = js; }
+    if (!(fromDetail && vals.pipeSpecId)) { const js = jobSpec(vals.rigId, vals.customerId); if (js) vals.pipeSpecId = js; }
+    // Photo-detail CTA: the tapped stage sticks (no fallback to Before / Preheat / After / next step).
+    if (fromDetail && STAGES[S.addDetailStage]) vals.stage = S.addDetailStage;
     // End pre-filled with no band: use that end's default band (never overwrite a carried band).
     if (!vals.bandNumber && END_BAND[vals.end]) vals.bandNumber = END_BAND[vals.end];
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
@@ -1209,7 +1279,7 @@ function renderForm(mode, id) {
     <img class="preview" src="${src}" alt="Photo preview">
     <p class="qinfo">${mode === 'add' ? `Taken ${fmtDate(item.createdAt)}${item.dateSource === 'exif' ? ' (from photo)' : ''}` : ''}</p>
     <form id="photoForm" class="card" autocomplete="off">
-      <div class="field stage-field"${mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0 ? ' hidden' : ''}><span class="lbl">Stage</span><div class="seg stage multi-stages${isRepairJoint(vals.notes, vals.serialNumber, vals.end) ? ' repair-stages' : ''}" id="fStage" role="radiogroup" aria-label="Stage">${stageButtonsHTML(isRepairJoint(vals.notes, vals.serialNumber, vals.end), vals.stage === 'preheat')}</div></div>
+      <div class="field stage-field"${mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0 ? ' hidden' : ''}><span class="lbl">Stage</span><div class="seg stage multi-stages${isRepairJoint(vals.notes, vals.serialNumber, vals.end) ? ' repair-stages' : ''}" id="fStage" role="radiogroup" aria-label="Stage">${stageButtonsHTML(isRepairJoint(vals.notes, vals.serialNumber, vals.end), vals.stage === 'preheat')}</div>${mode === 'edit' ? '<p class="muted small" id="stageRelabelHint">Changing Stage relabels this photo. To take a new picture, use the camera buttons on the photo screen.</p>' : ''}</div>
       <div class="pre-head" id="preHead" hidden></div>
       <div class="pre-head" id="preheatHead" hidden></div>
       <div id="mainFields">
@@ -1247,7 +1317,8 @@ function renderForm(mode, id) {
   // tucked under "More details". After-hardband keeps the original full form. Fields are moved, not re-created,
   // so switching stage never loses what was typed (notes included); only the quick-pick buttons change.
   const fld = (x) => $('#fld' + x);
-  const peekNotes = () => { const pk = $('#notesPeek'), v = $('#fNotes').value.trim(); pk.hidden = stage !== 'pre' || !v || $('#moreBox').open; pk.textContent = v ? 'Notes: ' + v : ''; };
+  const markChips = () => { const v = $('#fNotes').value; $$('#fChips [data-chip]').forEach((b) => b.classList.toggle('on', notesHasChip(v, b.dataset.chip))); };
+  const peekNotes = () => { markChips(); const pk = $('#notesPeek'), v = $('#fNotes').value.trim(); pk.hidden = stage !== 'pre' || !v || $('#moreBox').open; pk.textContent = v ? 'Notes: ' + v : ''; };
   const drawHead = () => { $('#preHead').innerHTML = `<span class="pre-head-rig">📁 ${esc(labelOf('rigs', $('#fRig').value) || 'No rig')}</span> · ${stageBadge({ stage: 'pre' })} <b>Before hardband</b> <span class="pre-head-op" id="preHeadOp">· 👷 ${esc(opText({ operator: opCtl.value }))}</span>`; };
   const opCtl = bindOpField('fOperator', { onChange: () => { if (stage === 'pre') drawHead(); } });
   const wireCtl = bindWireField('fWire');
@@ -1261,6 +1332,7 @@ function renderForm(mode, id) {
     $$('#fStage button').forEach((b) => { const on = b.dataset.v === stage; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
     const ch = $('#fChips'); ch.dataset.stage = stage;
     ch.innerHTML = (CHIPS[stage] || []).map((c) => `<button type="button" data-chip="${esc(c)}">${esc(c)}</button>`).join('');
+    markChips();
     $('#fNotes').placeholder = NOTES_HINT[stage] || '';
     // Only `pre` uses the Before inspection layout; Preheat is picture-only; repair/plasma/inlay/post use the full layout.
     const pre = stage === 'pre', heat = stage === 'preheat', main = $('#mainFields'), more = $('#moreFields');
@@ -1346,7 +1418,8 @@ function renderForm(mode, id) {
   $('.chips').onclick = (e) => {
     const c = e.target.closest('[data-chip]'); if (!c) return;
     const ta = $('#fNotes'); const cur = ta.value.trim();
-    ta.value = cur ? `${cur}${/[.,;]$/.test(cur) ? '' : ','} ${c.dataset.chip}` : c.dataset.chip;
+    // Already there (e.g. Repair carried from the joint, or typed "Repair  Defender…"): no duplicate, nothing removed.
+    if (!notesHasChip(cur, c.dataset.chip)) ta.value = cur ? `${cur}${/[.,;]$/.test(cur) ? '' : ','} ${c.dataset.chip}` : c.dataset.chip;
     peekNotes();
     syncRepairStages();
   };
@@ -1368,17 +1441,30 @@ function renderForm(mode, id) {
   // A half-typed new operator is saved with the photo (or the save waits for the missing name/number).
   const opReady = () => (!opCtl.adding || !!opCtl.commit()) && (!wireCtl.adding || !!wireCtl.commit()); // (a half-typed new wire too)
   // Inspection (Before) photos are found by serial later, so a blank serial gets one confirmation.
+  // A second Repair photo for the same joint is usually a mistake (double save / wrong stage): ask, Cancel by default.
+  const repairOk = async (v) => {
+    if (v.stage !== 'repair' || !v.serialNumber) return true;
+    const k = serialKey(v.serialNumber), e = v.end || '';
+    const dup = S.photos.some((x) => !x.deletedAt && (!p || x.id !== p.id) && stageOf(x) === 'repair' && serialKey(x.serialNumber) === k && (x.end || '') === e);
+    if (!dup) return true;
+    const ask = confirmBox({ title: `SN ${v.serialNumber} already has a Repair photo. Save another?`, ok: 'Save anyway', cancel: 'Cancel' });
+    setTimeout(() => { const no = $('#confirmNo'); if (no) no.focus(); }, 0); // Enter / default = Cancel
+    return ask;
+  };
   const serialOk = async (v) => {
     if (mode !== 'add' || v.stage !== 'pre' || v.serialNumber) return true;
     const go = await confirmBox({ title: 'Save without a serial number?', ok: 'Save anyway', cancel: 'Add serial' });
     if (!go) setTimeout(() => { const f = $('#fSerial'); if (f) f.focus(); }, 30);
     return go;
   };
+  let saving = false; // double-tap Save must never store the same picture twice (e.g. two Repair photos)
   $('#photoForm').onsubmit = async (e) => {
     e.preventDefault();
+    if (saving) return;
     if (!opReady()) return;
     const v = collect();
-    if (!(await serialOk(v))) return;
+    saving = true;
+    if (!(await serialOk(v)) || !(await repairOk(v))) { saving = false; return; }
     $('#saveBtn').disabled = true;
     try {
       if (mode === 'edit') {
@@ -1394,16 +1480,18 @@ function renderForm(mode, id) {
         await saveQueued(v);
         advanceQueue();
       }
-    } catch (err) { console.error(err); toast('Save failed: ' + err.message, 5000); $('#saveBtn').disabled = false; }
+    } catch (err) { console.error(err); toast('Save failed: ' + err.message, 5000); $('#saveBtn').disabled = false; saving = false; }
   };
   const sa = $('#saveAllBtn');
   if (sa) sa.onclick = async () => {
+    if (saving) return;
     if (!opReady()) return;
     const v = collect();
-    if (!(await serialOk(v))) return;
+    saving = true;
+    if (!(await serialOk(v)) || !(await repairOk(v))) { saving = false; return; }
     const b = busy('Saving…'); const n = S.queue.length - S.qIndex;
     try { for (let k = 0; k < n; k++) { b.update(`Saving ${k + 1} of ${n}…`, (k + 1) / n); await saveQueued(v); S.qIndex++; } }
-    catch (err) { b.done(); toast('Save failed: ' + err.message, 5000); return; }
+    catch (err) { b.done(); toast('Save failed: ' + err.message, 5000); saving = false; return; }
     b.done(); finishQueue();
   };
   const db2 = $('#discardBtn');
@@ -1411,10 +1499,12 @@ function renderForm(mode, id) {
 }
 async function saveQueued(v) {
   const it = S.queue[S.qIndex];
+  if (!it || it.savedId) return; // this queued picture is already stored (double submit) — never a second copy
   const now = Date.now();
   const p = { id: uid(), blob: it.blob, thumb: it.thumb, width: it.width, height: it.height, createdAt: it.createdAt, dateSource: it.dateSource, addedAt: now, updatedAt: now, origName: it.origName, ...v };
   if (S.addInspect && S.inspection && S.inspection.workOrder) p.workOrder = S.inspection.workOrder; // the job this inspection is for
-  await putPhoto(p);
+  it.savedId = p.id;
+  try { await putPhoto(p); } catch (err) { it.savedId = null; throw err; }
   S.photos.push(p);
   markDirty('photos', p.id);
   S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, bandNumber: v.bandNumber, stage: v.stage, operator: v.operator, wire: v.wire };
@@ -1449,6 +1539,12 @@ function renderSaved() {
     <div class="stack">
       ${(() => {
         const sn = p.serialNumber || '', st = stageOf(p), snTxt = sn ? ` (SN ${esc(sn)})` : '';
+        // Batch work (photo taken from a photo's detail screen): offer this joint's remaining missing stages, then Next joint.
+        if (S.addFromDetail && sn) {
+          const btns = jointCaptureButtons(p, 'saved');
+          return `<div class="stack" id="savedCapture">${btns ? `<p class="muted small" id="savedNextHint">Still to take for SN ${esc(sn)}:</p>${btns}` : `<p class="muted small" id="savedNextHint">SN ${esc(sn)}: every stage has a photo.</p>`}</div>
+      <label for="camInput" class="btn ${btns ? 'ghost' : 'primary big'} block" data-keep="0" id="nextJointBtn">📷 Next joint</label>`;
+        }
         const repair = isRepairJoint(p.notes, p.serialNumber, p.end);
         // Repair joint: primary = next step in Before → Repair → Plasma cut → Inlay → After (same joint, SN kept).
         // After Before, Plasma cut is offered directly too (the Repair photo is often skipped). Never Preheat.
@@ -1499,7 +1595,9 @@ async function handleFiles(fileList) {
   let keep = (S.pendingKeep != null) ? !!S.pendingKeep : !!S.keepJoint;
   const force = S.pendingStage;
   if (force && STAGES[force]) keep = true;
-  S.pendingKeep = null; S.pendingStage = null; S.keepJoint = false;
+  // Photo-detail CTA: copy that photo (customer, rig, spec, wire, operator, SN, end, band, notes) onto the new one.
+  const from = keep && S.keepFrom ? S.photos.find((x) => x.id === S.keepFrom && !x.deletedAt) : null;
+  S.pendingKeep = null; S.pendingStage = null; S.keepJoint = false; S.keepFrom = null;
   const b = busy(files.length > 1 ? `Preparing 1 of ${files.length}…` : 'Preparing photo…');
   const q = []; let failed = 0;
   for (let i = 0; i < files.length; i++) {
@@ -1509,7 +1607,9 @@ async function handleFiles(fileList) {
   b.done();
   if (failed) toast(`${failed} file${failed === 1 ? '' : 's'} could not be read${q.length ? ' and were skipped' : ''}.`, 4000);
   if (!q.length) return;
+  if (from) S.lastSaved = from;
   S.queue = q; S.qIndex = 0; S.savedCount = 0; S.batchValues = null; S.addContext = addCtx; S.addKeep = keep; S.forceStage = force; S.addInspect = inSession;
+  S.addFromDetail = !!(from && force && STAGES[force]); S.addDetailStage = S.addFromDetail ? force : null;
   if (location.hash === '#/add') route(); else location.hash = '#/add';
 }
 
@@ -1642,7 +1742,7 @@ function startInspectionSheet() {
   $('#inspForm', m).onsubmit = (e) => e.preventDefault();
 }
 function startInspection({ rig, cust, pipeSpecId, operator, wire = '' }) {
-  S.keepJoint = false; S.pendingKeep = null; S.pendingStage = null; S.forceStage = null;
+  S.keepJoint = false; S.pendingKeep = null; S.pendingStage = null; S.forceStage = null; S.keepFrom = null;
   const sess = { workOrder: '', rigName: rig.name || labelOf('rigs', rig.id), rigId: rig.id || null, customerId: cust.id || '', pipeSpecId: S.pipeSpecs.has(pipeSpecId) ? pipeSpecId : '',
     count: 0, operator: cleanOp(operator || ''), wire: cleanWire(wire) };
   S.inspection = sess;
@@ -2054,7 +2154,7 @@ async function init() {
   // Bottom-bar / library = fresh capture. Arm on pointerdown/touchstart only — NOT click.
   // click can be synthesized when another <label for="camInput"> (After photo CTA) activates the same input,
   // which used to wipe pendingKeep/pendingStage and turn After into Next joint (D7 / HP 249).
-  const armFreshCapture = () => { S.keepJoint = false; S.pendingKeep = false; S.pendingStage = null; };
+  const armFreshCapture = () => { S.keepJoint = false; S.pendingKeep = false; S.pendingStage = null; S.keepFrom = null; };
   for (const id of ['#camBtn', '#libBtn']) {
     const el = $(id);
     el.addEventListener('pointerdown', armFreshCapture);
@@ -2093,7 +2193,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v26'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v27'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {

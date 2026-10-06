@@ -246,6 +246,7 @@ textarea { min-height: 96px; resize: vertical; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .chips button { min-height: 44px; padding: 0 14px; border-radius: 22px; border: 2px solid var(--line); background: #fff; font: inherit; font-size: 16px; cursor: pointer; }
 .chips button:active { background: #ffe9d6; }
+.chips button.on { background: #ffe9d6; border-color: var(--accent); }
 .preview { width: 100%; max-height: 38vh; object-fit: contain; background: #111; border-radius: var(--radius); display: block; }
 .qinfo { text-align: center; margin: 8px 0 0; color: var(--muted); font-size: 15px; }
 .form-actions { margin-top: 18px; }
