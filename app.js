@@ -142,15 +142,17 @@ function isRepairJoint(notes, serial, end) {
   const e = end || '';
   return S.photos.some((x) => !x.deletedAt && serialKey(x.serialNumber) === k && (x.end || '') === e && notesHasRepair(x.notes));
 }
-function stageKeys(repair, keepPreheat) {
-  return repair ? ['pre', ...REPAIR_MID, ...(keepPreheat ? ['preheat'] : []), 'post'] : PLAIN_SEQ.slice();
+// Repair joints: the Before picture is the repair picture (hbp-v29), so the Stage row is Before / Plasma cut / Inlay / After.
+// keepRepair: an existing Repair-stage photo (e.g. D13) being edited keeps its Repair button so it shows and can be changed away.
+function stageKeys(repair, keepPreheat, keepRepair) {
+  return repair ? ['pre', ...(keepRepair ? ['repair'] : []), 'plasma', 'inlay', ...(keepPreheat ? ['preheat'] : []), 'post'] : PLAIN_SEQ.slice();
 }
-function stageButtonsHTML(repair, keepPreheat) {
-  // Work order: Before → Preheat → After. Repair joints: Before → Repair → Plasma cut → Inlay → After (no Preheat).
+function stageButtonsHTML(repair, keepPreheat, keepRepair) {
+  // Work order: Before → Preheat → After. Repair joints: Before → Plasma cut → Inlay → After (no Preheat, no Repair).
   // keepPreheat: an existing Preheat photo on a repair joint keeps its button so editing never silently changes its stage.
   const rows = repair
     ? [['pre', '<span>Before hardband</span><small>(inspection)</small>'],
-       ['repair', '<span>Repair</span>'],
+       ...(keepRepair ? [['repair', '<span>Repair</span>']] : []),
        ['plasma', '<span>Plasma cut</span>'],
        ['inlay', '<span>Inlay</span>'],
        ...(keepPreheat ? [['preheat', '<span>Preheat</span>']] : []),
@@ -379,6 +381,18 @@ function wireRoster() {
   add(currentWire());
   for (const p of S.photos || []) add(p.wire);
   return [...WIRE_COMMON, ...extra.sort(byText)];
+}
+const WIRE_INLAY = 'Build-up'; // Inlay photos (repair joints) are welded with Build-up wire
+// The joint's normal hardband wire: newest non-deleted, non-Inlay photo of that serial + end with a wire; else the last wire used.
+function jointNormalWire(serial, end) {
+  const k = serialKey(serial), e = end || '';
+  let best = null;
+  if (k) for (const x of S.photos) {
+    if (x.deletedAt || serialKey(x.serialNumber) !== k || (x.end || '') !== e || stageOf(x) === 'inlay' || !cleanWire(x.wire) || wireKey(x.wire) === wireKey(WIRE_INLAY)) continue;
+    if (!best || (x.addedAt || x.createdAt || 0) > (best.addedAt || best.createdAt || 0)) best = x;
+  }
+  const w = best ? cleanWire(best.wire) : currentWire();
+  return wireKey(w) === wireKey(WIRE_INLAY) ? '' : w;
 }
 const canonWire = (w) => { const k = wireKey(w); return k ? (wireRoster().find((x) => wireKey(x) === k) || cleanWire(w)) : ''; };
 function wireFieldHTML(id, value, { wrapId = '', label = 'Wire', blank = '— Pick the wire —' } = {}) {
@@ -1227,6 +1241,7 @@ function renderForm(mode, id) {
     p = S.photos.find((x) => x.id === id);
     if (!p) { location.hash = '#/'; return; }
     vals = { customerId: p.customerId, rigId: p.rigId, pipeSpecId: p.pipeSpecId, serialNumber: p.serialNumber || '', end: p.end || '', bandNumber: p.bandNumber || '', notes: p.notes || '', createdAt: p.createdAt, stage: stageOf(p), operator: cleanOp(p.operator), wire: cleanWire(p.wire) };
+    vals.wireNormal = wireKey(vals.wire) === wireKey(WIRE_INLAY) ? '' : vals.wire;
     setChrome({ title: 'Edit photo', back: `#/photo/${encodeURIComponent(id)}`, bottom: false });
   } else {
     item = S.queue[S.qIndex];
@@ -1252,7 +1267,9 @@ function renderForm(mode, id) {
     if (vals.stage === 'preheat' && vals.serialNumber && jointHasStage(vals.serialNumber, 'preheat')) vals.stage = 'post';
     // Repair joints never get a new Preheat photo (no preheat before plasma cutting) — go to the next repair step.
     if (vals.stage === 'preheat' && isRepairJoint(vals.notes, vals.serialNumber, vals.end)) vals.stage = 'post';
-    // Never default to a second Repair / Plasma cut / Inlay photo for a joint that already has one — next missing step.
+    // New photos never take the Repair stage any more (the Before is the repair picture) — Plasma cut instead.
+    if (vals.stage === 'repair') vals.stage = 'plasma';
+    // Never default to a second Plasma cut / Inlay photo for a joint that already has one — next missing step.
     if (REPAIR_MID.includes(vals.stage) && vals.serialNumber && isRepairJoint(vals.notes, vals.serialNumber, vals.end)) {
       const have = jointStageSet(vals.serialNumber, vals.end);
       if (have.has(vals.stage)) vals.stage = nextMissingStage(vals.stage, true, have) || 'post';
@@ -1269,11 +1286,17 @@ function renderForm(mode, id) {
     if (!(fromDetail && vals.pipeSpecId)) { const js = jobSpec(vals.rigId, vals.customerId); if (js) vals.pipeSpecId = js; }
     // Photo-detail CTA: the tapped stage sticks (no fallback to Before / Preheat / After / next step).
     if (fromDetail && STAGES[S.addDetailStage]) vals.stage = S.addDetailStage;
+    // Inlay photos use the Build-up wire; every other stage keeps the joint's normal hardband wire (never Build-up
+    // carried over from an Inlay photo). Only the wire changes — everything else still copies from the joint.
+    if (wireKey(vals.wire) === wireKey(WIRE_INLAY) && S.addKeep && S.lastSaved && stageOf(S.lastSaved) === 'inlay') vals.wire = jointNormalWire(vals.serialNumber, vals.end);
+    vals.wireNormal = wireKey(vals.wire) === wireKey(WIRE_INLAY) ? '' : vals.wire;
+    if (vals.stage === 'inlay') vals.wire = canonWire(WIRE_INLAY);
     // End pre-filled with no band: use that end's default band (never overwrite a carried band).
     if (!vals.bandNumber && END_BAND[vals.end]) vals.bandNumber = END_BAND[vals.end];
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
   }
   for (const [k, kind] of [['customerId', 'customers'], ['rigId', 'rigs'], ['pipeSpecId', 'pipeSpecs']]) if (vals[k] && !S[kind].has(vals[k])) vals[k] = '';
+  const keepRepair = mode === 'edit' && stageOf(p) === 'repair'; // only an existing Repair photo keeps the Repair button
   const srcBlob = mode === 'edit' ? (p.blob || p.thumb) : item.blob;
   const src = srcBlob ? viewUrl(srcBlob) : '';
   const remaining = mode === 'add' ? S.queue.length - S.qIndex : 0;
@@ -1283,7 +1306,7 @@ function renderForm(mode, id) {
     <img class="preview" src="${src}" alt="Photo preview">
     <p class="qinfo">${mode === 'add' ? `Taken ${fmtDate(item.createdAt)}${item.dateSource === 'exif' ? ' (from photo)' : ''}` : ''}</p>
     <form id="photoForm" class="card" autocomplete="off">
-      <div class="field stage-field"${mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0 ? ' hidden' : ''}><span class="lbl">Stage</span><div class="seg stage multi-stages${isRepairJoint(vals.notes, vals.serialNumber, vals.end) ? ' repair-stages' : ''}" id="fStage" role="radiogroup" aria-label="Stage">${stageButtonsHTML(isRepairJoint(vals.notes, vals.serialNumber, vals.end), vals.stage === 'preheat')}</div>${mode === 'edit' ? '<p class="muted small" id="stageRelabelHint">Changing Stage relabels this photo. To take a new picture, use the camera buttons on the photo screen.</p>' : ''}</div>
+      <div class="field stage-field"${mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0 ? ' hidden' : ''}><span class="lbl">Stage</span><div class="seg stage multi-stages${isRepairJoint(vals.notes, vals.serialNumber, vals.end) ? ' repair-stages' : ''}" id="fStage" role="radiogroup" aria-label="Stage">${stageButtonsHTML(isRepairJoint(vals.notes, vals.serialNumber, vals.end), vals.stage === 'preheat', keepRepair)}</div>${mode === 'edit' ? '<p class="muted small" id="stageRelabelHint">Changing Stage relabels this photo. To take a new picture, use the camera buttons on the photo screen.</p>' : ''}</div>
       <div class="pre-head" id="preHead" hidden></div>
       <div class="pre-head" id="preheatHead" hidden></div>
       <div id="mainFields">
@@ -1371,12 +1394,12 @@ function renderForm(mode, id) {
     const box = $('#fStage');
     // Repair joints have no Preheat button, except a photo that already is (or was opened as) Preheat keeps it.
     const keepHeat = vals.stage === 'preheat' || stage === 'preheat';
-    const want = stageKeys(repair, keepHeat).join(',');
+    const want = stageKeys(repair, keepHeat, keepRepair).join(',');
     const have = [...box.querySelectorAll('button')].map((b) => b.dataset.v).join(',');
     let changed = false;
     if (REPAIR_MID.includes(stage) && !repair) { stage = (mode === 'add' && S.addInspect) ? 'pre' : 'post'; changed = true; }
     if (have !== want) {
-      box.innerHTML = stageButtonsHTML(repair, keepHeat);
+      box.innerHTML = stageButtonsHTML(repair, keepHeat, keepRepair);
       box.classList.add('multi-stages'); box.classList.toggle('repair-stages', repair);
       changed = true;
     }
@@ -1384,9 +1407,18 @@ function renderForm(mode, id) {
   };
   syncRepairStages();
   drawStage(); // initial layout (syncRepairStages skips draw when nothing changed)
+  // Tapping Inlay switches the wire to Build-up; tapping away again puts the joint's wire back (unless he picked another).
+  let wireNormal = vals.wireNormal || '';
   $('#fStage').onclick = (e) => {
     const b = e.target.closest('button'); if (!b || b.dataset.v === stage) return;
+    const was = stage;
     stage = b.dataset.v; drawStage();
+    if (stage === 'inlay' && was !== 'inlay') {
+      if (wireKey(wireCtl.value) !== wireKey(WIRE_INLAY)) wireNormal = wireCtl.value;
+      if (!wireCtl.adding) wireCtl.choose(canonWire(WIRE_INLAY));
+    } else if (was === 'inlay' && stage !== 'inlay' && !wireCtl.adding && wireKey(wireCtl.value) === wireKey(WIRE_INLAY)) {
+      wireCtl.choose(wireNormal ? canonWire(wireNormal) : '');
+    }
     if (stage === 'pre' && !$('#fSerial').value) $('#fSerial').focus();
   };
   // New photo: picking another rig re-defaults Pipe spec to that rig's job spec, unless he picked a spec by hand here.
@@ -1445,16 +1477,6 @@ function renderForm(mode, id) {
   // A half-typed new operator is saved with the photo (or the save waits for the missing name/number).
   const opReady = () => (!opCtl.adding || !!opCtl.commit()) && (!wireCtl.adding || !!wireCtl.commit()); // (a half-typed new wire too)
   // Inspection (Before) photos are found by serial later, so a blank serial gets one confirmation.
-  // A second Repair photo for the same joint is usually a mistake (double save / wrong stage): ask, Cancel by default.
-  const repairOk = async (v) => {
-    if (v.stage !== 'repair' || !v.serialNumber) return true;
-    const k = serialKey(v.serialNumber), e = v.end || '';
-    const dup = S.photos.some((x) => !x.deletedAt && (!p || x.id !== p.id) && stageOf(x) === 'repair' && serialKey(x.serialNumber) === k && (x.end || '') === e);
-    if (!dup) return true;
-    const ask = confirmBox({ title: `SN ${v.serialNumber} already has a Repair photo. Save another?`, ok: 'Save anyway', cancel: 'Cancel' });
-    setTimeout(() => { const no = $('#confirmNo'); if (no) no.focus(); }, 0); // Enter / default = Cancel
-    return ask;
-  };
   const serialOk = async (v) => {
     if (mode !== 'add' || v.stage !== 'pre' || v.serialNumber) return true;
     const go = await confirmBox({ title: 'Save without a serial number?', ok: 'Save anyway', cancel: 'Add serial' });
@@ -1468,7 +1490,7 @@ function renderForm(mode, id) {
     if (!opReady()) return;
     const v = collect();
     saving = true;
-    if (!(await serialOk(v)) || !(await repairOk(v))) { saving = false; return; }
+    if (!(await serialOk(v))) { saving = false; return; }
     $('#saveBtn').disabled = true;
     try {
       if (mode === 'edit') {
@@ -1492,7 +1514,7 @@ function renderForm(mode, id) {
     if (!opReady()) return;
     const v = collect();
     saving = true;
-    if (!(await serialOk(v)) || !(await repairOk(v))) { saving = false; return; }
+    if (!(await serialOk(v))) { saving = false; return; }
     const b = busy('Saving…'); const n = S.queue.length - S.qIndex;
     try { for (let k = 0; k < n; k++) { b.update(`Saving ${k + 1} of ${n}…`, (k + 1) / n); await saveQueued(v); S.qIndex++; } }
     catch (err) { b.done(); toast('Save failed: ' + err.message, 5000); saving = false; return; }
@@ -1514,8 +1536,10 @@ async function saveQueued(v) {
   S.lastSaved = p; S.batchValues = { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId, serialNumber: v.serialNumber, end: v.end, bandNumber: v.bandNumber, stage: v.stage, operator: v.operator, wire: v.wire };
   if (S.addInspect && S.inspection && v.serialNumber) S.inspection.serialNumber = v.serialNumber;
   if (v.operator) { rememberOperator(v.operator, true); if (S.addInspect && S.inspection) { S.inspection.operator = v.operator; drawInspBar(); } } // next photo: same operator
-  if (v.wire) rememberWire(v.wire, true); // next job / photo: same wire
-  if (S.addInspect && S.inspection) { Object.assign(S.inspection, { rigId: v.rigId || '', customerId: v.customerId || '', pipeSpecId: v.pipeSpecId || '', wire: v.wire || '' }); drawInspBar(); } // next photo: what was just saved
+  // Inlay's Build-up never becomes the remembered / job wire — later Before / Plasma / After photos keep the hardband wire.
+  const inlayWire = v.stage === 'inlay' && wireKey(v.wire) === wireKey(WIRE_INLAY);
+  if (v.wire) rememberWire(v.wire, !inlayWire); // next job / photo: same wire
+  if (S.addInspect && S.inspection) { Object.assign(S.inspection, { rigId: v.rigId || '', customerId: v.customerId || '', pipeSpecId: v.pipeSpecId || '', ...(inlayWire ? {} : { wire: v.wire || '' }) }); drawInspBar(); } // next photo: what was just saved
   S.savedCount++;
   if (S.addInspect && S.inspection) S.inspection.count++;
   await setMeta('lastUsed', { customerId: v.customerId, rigId: v.rigId, pipeSpecId: v.pipeSpecId });
@@ -2202,7 +2226,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v28'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v29'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
