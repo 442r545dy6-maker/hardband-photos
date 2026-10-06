@@ -117,8 +117,12 @@ const PLAIN_SEQ = ['pre', 'preheat', 'post'];
 const END_BAND = { Box: '3', Pin: '2' };
 const REPAIR_SEQ = ['pre', 'repair', 'plasma', 'inlay', 'post'];
 /** Next stage in this joint's work order, or null at the end (After). Legacy Preheat on a repair joint → After. */
+// Repair joints: the Before picture serves as the repair picture (hbp-v28), so Before → Plasma cut. A Repair-stage photo
+// (picked by hand in the Stage row, or older data like D13) still continues to Plasma cut.
+const REPAIR_FLOW = ['pre', 'plasma', 'inlay', 'post'];
 function nextStage(st, repair) {
-  const seq = repair ? REPAIR_SEQ : PLAIN_SEQ;
+  if (repair && st === 'repair') return 'plasma';
+  const seq = repair ? REPAIR_FLOW : PLAIN_SEQ;
   const i = seq.indexOf(st);
   if (i < 0) return st === 'preheat' ? 'post' : null;
   return i < seq.length - 1 ? seq[i + 1] : null;
@@ -1051,13 +1055,13 @@ function renderPhoto(id) {
 // and the bottom Take Photo bar is hidden here, so this is the capture path from a saved photo (D13 / HP 249).
 // Repairs are done in BATCHES (Befores on every joint, then all plasma cuts, then inlays, then Afters), so every stage the
 // joint (same serial + end, non-deleted photos) has no photo of yet gets a button — not just "next after this photo".
-//   repair joint: Repair → Plasma cut → Inlay → After (Plasma cut prominent while missing)
+//   repair joint: Plasma cut → Inlay → After (Plasma cut prominent while missing; the Before is the repair picture)
 //   normal joint: Before → Preheat → After
 // Each button copies the joint's details from photo p (data-from) and forces its stage; nothing depends on S.lastSaved.
 function jointMissingStages(p) {
   if (!p || !p.serialNumber) return [];
   const repair = isRepairJoint(p.notes, p.serialNumber, p.end), have = jointStageSet(p.serialNumber, p.end);
-  return (repair ? ['repair', 'plasma', 'inlay', 'post'] : PLAIN_SEQ).filter((st) => !have.has(st));
+  return (repair ? ['plasma', 'inlay', 'post'] : PLAIN_SEQ).filter((st) => !have.has(st)); // no Repair button: Before = repair picture
 }
 const CAP_ID = { pre: 'Pre', preheat: 'Preheat', repair: 'Repair', plasma: 'Plasma', inlay: 'Inlay', post: 'After' };
 const CAP_NAME = { pre: 'Before', preheat: 'Preheat', repair: 'Repair', plasma: 'Plasma cut', inlay: 'Inlay', post: 'After' };
@@ -1548,10 +1552,15 @@ function renderSaved() {
         const repair = isRepairJoint(p.notes, p.serialNumber, p.end);
         // Repair joint: primary = next step in Before → Repair → Plasma cut → Inlay → After (same joint, SN kept).
         // After Before, Plasma cut is offered directly too (the Repair photo is often skipped). Never Preheat.
-        if (repair && st === 'pre' && sn) return `<p class="muted small" id="savedNextHint">Next for SN ${esc(sn)}: Repair → Plasma cut → Inlay → After</p>
-      <label for="camInput" class="btn primary big block" data-keep="1" data-stage="repair" id="nextPhotoBtn">📷 Repair photo${snTxt}</label>
-      <label for="camInput" class="btn secondary big block" data-keep="1" data-stage="plasma" id="plasmaBtn">🔥 Plasma cut photo${snTxt}</label>
+        // Repair joint Before (= the repair picture, hbp-v28): primary Plasma cut, then the joint's other missing stages. No Repair button.
+        if (repair && st === 'pre' && sn) {
+          const rest = jointMissingStages(p).filter((x) => x !== 'plasma');
+          const hasPlasma = jointStageSet(p.serialNumber, p.end).has('plasma');
+          return `<p class="muted small" id="savedNextHint">Next for SN ${esc(sn)}: Plasma cut → Inlay → After</p>
+      ${hasPlasma ? '' : `<label for="camInput" class="btn primary big block" data-keep="1" data-stage="plasma" id="plasmaBtn">🔥 Plasma cut photo${snTxt}</label>`}
+      ${rest.map((x) => `<label for="camInput" class="btn secondary block" data-keep="1" data-stage="${x}" id="saved${CAP_ID[x]}Btn">📷 ${esc(CAP_NAME[x])} photo${snTxt}</label>`).join('')}
       <label for="camInput" class="btn ghost block" data-keep="0" id="nextJointBtn">Next joint</label>`;
+        }
         if (repair && REPAIR_MID.includes(st)) {
           const nx = nextStage(st, true);
           return `<p class="muted small" id="savedNextHint">Next: ${esc(STAGES[nx].label)} photo${sn ? ' for SN ' + esc(sn) : ''}</p>
@@ -2193,7 +2202,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v27'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v28'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
