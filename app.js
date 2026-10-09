@@ -777,6 +777,7 @@ function route() {
     else if (v === 'edit') renderForm('edit', parts[1]);
     else if (v === 'add') renderForm('add');
     else if (v === 'saved') renderSaved();
+    else if (v === 'tools') renderTools();
     else if (v === 'manage') renderManage(parts[1]);
     else if (v === 'backup') renderBackup();
     else if (v === 'rejects') renderRejects(parts[1]);
@@ -851,6 +852,7 @@ function renderHome() {
   view.innerHTML = `
     <button type="button" id="opChip" class="op-chip${curOp ? '' : ' unset'}" aria-label="Operator on this phone">👷 <span class="op-chip-l">Operator:</span> <b id="opChipName">${esc(curOp || 'Tap to pick your name')}</b> <span class="op-chip-c">▾</span></button>
     <button type="button" id="rejectBtn" class="btn reject-btn big block">⛔ Log rejected wire</button>
+    <a class="btn ghost block" id="homeToolsBtn" href="#/tools">🧰 Tools (add from library, open folder)</a>
     ${rejectSummaryHTML(curOp)}
     <div class="searchbar">
       <input id="q" type="search" placeholder="Search serial, rig, notes…" value="${esc(s.q)}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-label="Search">
@@ -1220,11 +1222,11 @@ async function shareComparison(pre, post) {
 // Condition quick-pick buttons (they only add text to the notes box; existing notes are never changed).
 // The set shown depends on the stage: inspection before hardbanding, or the result after hardbanding.
 const CHIPS = {
-  pre: ['No hardband needed', 'Reapply', 'Repair', 'Eccentric band'],
+  pre: ['Good', 'Eccentric band', 'Repair'],
   repair: [],
   plasma: [],
   inlay: [],
-  post: ['Good', 'Rejected wire', 'Excessive porosity', 'Cracks', 'Needs repair', 'Eccentric band'],
+  post: ['Good', 'Rejected wire', 'Excessive porosity'],
   preheat: [],
 };
 const NOTES_HINT = {
@@ -1329,7 +1331,7 @@ function renderForm(mode, id) {
         <div class="chips" id="fChips" data-stage="${vals.stage}"></div></div>
       ${mode === 'edit' ? `<div class="field" id="fldDate"><label for="fDate">Date / time taken</label><input id="fDate" type="datetime-local" value="${dtLocalValue(vals.createdAt)}"></div>` : ''}
       </div>
-      <details class="more-box" id="moreBox" hidden><summary>More details <span class="muted small">Box/Pin, band, notes, operator, pipe spec, wire, customer${mode === 'edit' ? ', date' : ''}</span></summary><div id="moreFields"></div></details>
+      <details class="more-box" id="moreBox" hidden><summary>More details <span class="muted small" id="moreSum">Box/Pin, band, notes, operator, pipe spec, wire, customer${mode === 'edit' ? ', date' : ''}</span></summary><div id="moreFields"></div></details>
       <div class="stack form-actions">
         ${mode === 'edit'
     ? `<button type="submit" class="btn primary big block" id="saveBtn">Save changes</button><a class="btn ghost block" href="#/photo/${encodeURIComponent(id)}">Cancel</a>`
@@ -1362,12 +1364,16 @@ function renderForm(mode, id) {
     markChips();
     $('#fNotes').placeholder = NOTES_HINT[stage] || '';
     // Only `pre` uses the Before inspection layout; Preheat is picture-only; repair/plasma/inlay/post use the full layout.
+    // New After photo (hbp-v30): Serial, End, Band, Condition up front; customer / rig / operator / spec / wire under More details.
     const pre = stage === 'pre', heat = stage === 'preheat', main = $('#mainFields'), more = $('#moreFields');
-    const order = pre ? ['Serial', 'PreChips', 'End'] : heat ? [] : ['Customer', 'Rig', 'Operator', 'Spec', 'Wire', 'Serial', 'End', 'Band', 'Notes', 'Date'];
+    const postTrim = stage === 'post' && mode === 'add';
+    const order = pre ? ['Serial', 'PreChips', 'End'] : heat ? [] : postTrim ? ['Serial', 'End', 'Band', 'Notes'] : ['Customer', 'Rig', 'Operator', 'Spec', 'Wire', 'Serial', 'End', 'Band', 'Notes', 'Date'];
     order.map(fld).filter(Boolean).forEach((el) => main.appendChild(el));
     if (pre) ['Band', 'Notes', 'Operator', 'Spec', 'Wire', 'Customer', 'Rig', 'Date'].map(fld).filter(Boolean).forEach((el) => more.appendChild(el));
+    if (postTrim) ['Customer', 'Rig', 'Operator', 'Spec', 'Wire', 'Date'].map(fld).filter(Boolean).forEach((el) => more.appendChild(el));
+    $('#moreSum').textContent = postTrim ? 'customer, rig, operator, pipe spec, wire' : `Box/Pin, band, notes, operator, pipe spec, wire, customer${mode === 'edit' ? ', date' : ''}`;
     if (!heat) (pre ? $('#preChipSlot') : fld('Notes')).appendChild(ch);
-    fld('PreChips').hidden = !pre; $('#moreBox').hidden = !pre; $('#preHead').hidden = !pre;
+    fld('PreChips').hidden = !pre; $('#moreBox').hidden = !(pre || postTrim); $('#preHead').hidden = !pre;
     // Picture-only Preheat: hide stage picker + every metadata field; show a short badge line.
     const stageField = document.querySelector('.stage-field');
     if (stageField) stageField.hidden = heat || (mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0);
@@ -1407,6 +1413,11 @@ function renderForm(mode, id) {
   };
   syncRepairStages();
   drawStage(); // initial layout (syncRepairStages skips draw when nothing changed)
+  // Preheat from the camera saves itself (hbp-v30): the iOS camera's Retake / Use Photo is the check. Library / Edit don't.
+  if (mode === 'add' && stage === 'preheat' && S.addFromCamera && item && !item.autoSaved) {
+    item.autoSaved = true;
+    setTimeout(() => { const f = $('#photoForm'); if (f && S.queue[S.qIndex] === item && stage === 'preheat') f.requestSubmit(); }, 0);
+  }
   // Tapping Inlay switches the wire to Build-up; tapping away again puts the joint's wire back (unless he picked another).
   let wireNormal = vals.wireNormal || '';
   $('#fStage').onclick = (e) => {
@@ -1604,9 +1615,8 @@ function renderSaved() {
         return `${sn ? `<label for="camInput" class="btn primary big block" data-keep="1">📷 Same joint (SN ${esc(sn)})</label>` : ''}
       <label for="camInput" class="btn ${sn ? 'secondary' : 'primary'} big block" data-keep="0">📷 Next joint</label>`;
       })()}
-      <label for="libInput" class="btn ghost block" data-keep="0">🖼 Add from library</label>
-      <a class="btn ghost block" id="openFolderBtn" href="${folderHash}">📁 Open folder</a>
-      <a class="btn ghost block" href="#/">Home</a>
+      <a class="btn ghost block" id="savedHomeBtn" href="#/">Home</a>
+      <a class="btn ghost block" id="savedToolsBtn" href="#/tools">🧰 Tools</a>
     </div>`;
   // pointerdown/touchstart fire before the camera sheet steals the page — click alone can lose the race to route()/camBtn.
   $$('[data-keep]').forEach((l) => {
@@ -1616,7 +1626,22 @@ function renderSaved() {
     l.addEventListener('click', arm);
   });
 }
-async function handleFiles(fileList) {
+// Tools (hbp-v30): Add from library + Open folder (moved off the Saved screen).
+function renderTools() {
+  setChrome({ title: 'Tools', back: '#/', bottom: false });
+  const lu = S.meta.lastUsed || {}, ls = S.lastSaved;
+  const folder = S.lastListHash && S.lastListHash.startsWith('#/folder/') ? S.lastListHash
+    : ls ? `#/folder/${encodeURIComponent(ls.customerId || '')}/${encodeURIComponent(ls.rigId || '')}`
+    : `#/folder/${encodeURIComponent(lu.customerId || '')}/${encodeURIComponent(lu.rigId || '')}`;
+  view.innerHTML = `<div class="stack" id="toolsPage">
+      <label for="libInput" class="btn secondary big block" id="toolsLibBtn">🖼 Add from library</label>
+      <a class="btn secondary big block" id="toolsFolderBtn" href="${folder}">📁 Open folder</a>
+      <a class="btn ghost block" href="#/">Home</a>
+    </div>`;
+  const lb = $('#toolsLibBtn'), fresh = () => { S.keepJoint = false; S.pendingKeep = false; S.pendingStage = null; S.keepFrom = null; };
+  lb.addEventListener('pointerdown', fresh); lb.addEventListener('touchstart', fresh, { passive: true });
+}
+async function handleFiles(fileList, fromCamera = false) {
   const files = Array.from(fileList || []).filter((f) => !f.type || f.type.startsWith('image/') || /\.(jpe?g|png|heic|heif|webp)$/i.test(f.name));
   if (!files.length) return;
   const insp = S.inspection;
@@ -1642,6 +1667,7 @@ async function handleFiles(fileList) {
   if (!q.length) return;
   if (from) S.lastSaved = from;
   S.queue = q; S.qIndex = 0; S.savedCount = 0; S.batchValues = null; S.addContext = addCtx; S.addKeep = keep; S.forceStage = force; S.addInspect = inSession;
+  S.addFromCamera = !!fromCamera;
   S.addFromDetail = !!(from && force && STAGES[force]); S.addDetailStage = S.addFromDetail ? force : null;
   if (location.hash === '#/add') route(); else location.hash = '#/add';
 }
@@ -2198,7 +2224,7 @@ async function init() {
   $('#inspDone').onclick = () => finishInspection();
   for (const id of ['#camInput', '#libInput']) {
     const inp = $(id);
-    inp.addEventListener('change', () => { const f = Array.from(inp.files || []); inp.value = ''; handleFiles(f); });
+    inp.addEventListener('change', () => { const f = Array.from(inp.files || []); inp.value = ''; handleFiles(f, id === '#camInput'); });
   }
   const imp = $('#importInput');
   imp.addEventListener('change', () => { const f = imp.files && imp.files[0]; imp.value = ''; importZip(f); });
@@ -2226,7 +2252,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v29'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v30'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
