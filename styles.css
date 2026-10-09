@@ -328,3 +328,5 @@ dl.kv dd { margin: 0; font-weight: 600; word-break: break-word; }
 .btn.star-on { background: #fff4cc; color: var(--ink); border-color: #e0b400; }
 #postTop { margin-bottom: 12px; }
 #postTop #postHead { margin-bottom: 10px; }
+.add-star { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; min-height: 40px; margin: 0 6px 0 0; padding: 0; border: 1.5px solid var(--line); border-radius: 20px; background: var(--card); font-size: 20px; line-height: 1; vertical-align: middle; cursor: pointer; }
+.add-star.on { background: #fff4cc; border-color: #e0b400; }

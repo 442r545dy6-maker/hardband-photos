@@ -100,7 +100,7 @@ const countUsing = (kind, id) => S.photos.filter((p) => p[KINDS[kind].ref] === i
 // Photo stage: 'pre' = taken during inspection BEFORE hardbanding, 'post' = AFTER hardbanding.
 // Photos saved before this field existed (no stage) count as 'post'.
 const STAGES = {
-  pre: { label: 'Before hardband (inspection)', short: 'Before', badge: 'BEFORE', words: 'before pre inspection' },
+  pre: { label: 'Before hardband', short: 'Before', badge: 'BEFORE', words: 'before pre inspection' },
   repair: { label: 'Repair', short: 'Repair', badge: 'REPAIR', words: 'repair' },
   plasma: { label: 'Plasma cut', short: 'Plasma', badge: 'PLASMA', words: 'plasma cut' },
   inlay: { label: 'Inlay', short: 'Inlay', badge: 'INLAY', words: 'inlay placed' },
@@ -151,13 +151,13 @@ function stageButtonsHTML(repair, keepPreheat, keepRepair) {
   // Work order: Before → Preheat → After. Repair joints: Before → Plasma cut → Inlay → After (no Preheat, no Repair).
   // keepPreheat: an existing Preheat photo on a repair joint keeps its button so editing never silently changes its stage.
   const rows = repair
-    ? [['pre', '<span>Before hardband</span><small>(inspection)</small>'],
+    ? [['pre', '<span>Before hardband</span>'],
        ...(keepRepair ? [['repair', '<span>Repair</span>']] : []),
        ['plasma', '<span>Plasma cut</span>'],
        ['inlay', '<span>Inlay</span>'],
        ...(keepPreheat ? [['preheat', '<span>Preheat</span>']] : []),
        ['post', '<span>After hardband</span>']]
-    : [['pre', '<span>Before hardband</span><small>(inspection)</small>'],
+    : [['pre', '<span>Before hardband</span>'],
        ['preheat', '<span>Preheat</span>'],
        ['post', '<span>After hardband</span>']];
   return rows.map(([v, html]) => `<button type="button" data-v="${v}" role="radio">${html}</button>`).join('');
@@ -1233,7 +1233,7 @@ async function buildComparisonJpeg(pre, post) {
     ctx.fillStyle = st === 'pre' ? '#ffffff' : '#111111'; ctx.fillText(lbl, x + 28, y + 22);
     let ty = y + imgH + 18;
     ctx.fillStyle = '#111820'; ctx.font = `bold 30px ${font}`;
-    ctx.fillText(st === 'pre' ? 'Before hardband (inspection)' : 'After hardband', x, ty); ty += 42;
+    ctx.fillText(st === 'pre' ? 'Before hardband' : 'After hardband', x, ty); ty += 42;
     ctx.font = `26px ${font}`; ctx.fillStyle = '#333d47';
     ctx.fillText(`${isoLocal(p.createdAt)}${bandText(p) ? '  ·  ' + bandText(p) : ''}${p.serialNumber ? '  ·  SN ' + p.serialNumber : ''}`, x, ty); ty += 38;
     if (!sameWhere) { ctx.fillText(`Rig ${rigName(p)}  ·  ${labelOf('customers', p.customerId) || 'No customer'}`, x, ty); ty += 38; }
@@ -1359,6 +1359,7 @@ function renderForm(mode, id) {
       <div class="field stage-field"${mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0 ? ' hidden' : ''}><span class="lbl">Stage</span><div class="seg stage multi-stages${isRepairJoint(vals.notes, vals.serialNumber, vals.end) ? ' repair-stages' : ''}" id="fStage" role="radiogroup" aria-label="Stage">${stageButtonsHTML(isRepairJoint(vals.notes, vals.serialNumber, vals.end), vals.stage === 'preheat', keepRepair)}</div>${mode === 'edit' ? '<p class="muted small" id="stageRelabelHint">Changing Stage relabels this photo. To take a new picture, use the camera buttons on the photo screen.</p>' : ''}</div>
       <div class="pre-head" id="preHead" hidden></div>
       <div class="pre-head" id="preheatHead" hidden></div>
+      <div class="pre-head" id="starSlot" hidden></div>
       <div id="postTop" hidden><div class="pre-head" id="postHead" hidden></div></div>
       <div id="mainFields">
       <div class="field" id="fldCustomer"><label for="fCustomer">Customer</label>${selectHTML('customers', 'customerId', 'fCustomer')}</div>
@@ -1397,7 +1398,7 @@ function renderForm(mode, id) {
   const fld = (x) => $('#fld' + x);
   const markChips = () => { const v = $('#fNotes').value; $$('#fChips [data-chip]').forEach((b) => b.classList.toggle('on', notesHasChip(v, b.dataset.chip))); };
   const peekNotes = () => { markChips(); const pk = $('#notesPeek'), v = $('#fNotes').value.trim(); pk.hidden = stage !== 'pre' || !v || $('#moreBox').open; pk.textContent = v ? 'Notes: ' + v : ''; };
-  const drawHead = () => { $('#preHead').innerHTML = `<span class="pre-head-rig">📁 ${esc(labelOf('rigs', $('#fRig').value) || 'No rig')}</span> · ${stageBadge({ stage: 'pre' })} <b>Before hardband</b> <span class="pre-head-op" id="preHeadOp">· 👷 ${esc(opText({ operator: opCtl.value }))}</span>`; };
+  const drawHead = () => { $('#preHead').innerHTML = `<span class="pre-head-rig">📁 ${esc(labelOf('rigs', $('#fRig').value) || 'No rig')}</span> · ${stageBadge({ stage: 'pre' })} <b>Before hardband</b> <span class="pre-head-op" id="preHeadOp">· 👷 ${esc(opText({ operator: opCtl.value }))}</span>`; placeStar(); };
   const opCtl = bindOpField('fOperator', { onChange: () => { if (stage === 'pre') drawHead(); } });
   const wireCtl = bindWireField('fWire');
   attachPickList($('#fSerial'), $('#snPick'), serials);
@@ -1405,12 +1406,29 @@ function renderForm(mode, id) {
     const sn = ($('#fSerial') && $('#fSerial').value.trim()) || vals.serialNumber || '';
     const rig = labelOf('rigs', ($('#fRig') && $('#fRig').value) || vals.rigId) || 'No rig';
     $('#preheatHead').innerHTML = `${stageBadge({ stage: 'preheat' })} <b>Preheat temp photo</b>${sn ? ' · SN ' + esc(sn) : ''} · 📁 ${esc(rig)} <span class="muted small">— snap and save, tags copied from this joint</span>`;
+    placeStar();
+  };
+  // hbp-v35: ☆/⭐ star icon on the add form, at the start of the head line under the Stage buttons (form state until Save).
+  let addStar = false;
+  const asb = mode === 'add' ? document.createElement('button') : null;
+  if (asb) {
+    Object.assign(asb, { type: 'button', id: 'addStarBtn', className: 'add-star', textContent: '☆' });
+    asb.setAttribute('aria-label', 'Star this photo'); asb.setAttribute('aria-pressed', 'false');
+    asb.onclick = () => { addStar = !addStar; asb.textContent = addStar ? '⭐' : '☆'; asb.classList.toggle('on', addStar); asb.setAttribute('aria-pressed', String(addStar)); };
+  }
+  const placeStar = () => {
+    if (!asb) return;
+    const head = ['#preHead', '#preheatHead', '#postHead'].map((x) => $(x)).find((h) => h && !h.hidden && !(h.id === 'postHead' && $('#postTop').hidden));
+    const slot = $('#starSlot');
+    slot.hidden = !!head;
+    (head || slot).prepend(asb);
   };
   // hbp-v34: new After photo — Save moves up under the Stage row; a serial carried from the joint shows as a one-line head.
   const snCarried = mode === 'add' && !!String(vals.serialNumber || '').trim();
   const drawPostHead = () => {
     const sn = $('#fSerial').value.trim(), rig = labelOf('rigs', $('#fRig').value) || 'No rig';
     $('#postHead').innerHTML = `${stageBadge({ stage: 'post' })} · <b>SN ${esc(sn)}</b> · 📁 ${esc(rig)}`;
+    placeStar();
   };
   const drawStage = () => {
     $$('#fStage button').forEach((b) => { const on = b.dataset.v === stage; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
@@ -1450,6 +1468,7 @@ function renderForm(mode, id) {
     else if (sb.parentElement === top) $('.form-actions', $('#photoForm')).prepend(sb);
     top.hidden = !postTrim; $('#postHead').hidden = !hideSn;
     if (hideSn) { fld('Serial').hidden = true; drawPostHead(); }
+    placeStar();
     peekNotes();
   };
   // Rebuild the Stage button set when Repair is marked/cleared (or serial/end match a repair joint).
@@ -1544,6 +1563,7 @@ function renderForm(mode, id) {
   const collect = () => ({
     customerId: $('#fCustomer').value.replace('__new', ''), rigId: $('#fRig').value.replace('__new', ''), pipeSpecId: $('#fSpec').value.replace('__new', ''),
     serialNumber: $('#fSerial').value.trim().toUpperCase(), end, bandNumber: band, notes: $('#fNotes').value.trim(), stage, operator: cleanOp(opCtl.value), wire: cleanWire(wireCtl.value),
+    ...(mode === 'add' && addStar ? { starred: true } : {}), // hbp-v35: ☆ Star on the add form (form state until Save)
   });
   // A half-typed new operator is saved with the photo (or the save waits for the missing name/number).
   const opReady = () => (!opCtl.adding || !!opCtl.commit()) && (!wireCtl.adding || !!wireCtl.commit()); // (a half-typed new wire too)
@@ -2303,7 +2323,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v34'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v35'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
