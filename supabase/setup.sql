@@ -137,6 +137,10 @@ alter table public.photos add column if not exists wire text;
 -- When the job (rig folder) was marked complete; null = open. Same as supabase/migrations/009_rigs_closed_at.sql.
 alter table public.rigs add column if not exists closed_at timestamptz;
 
+-- ---------- migration 010: photo stars (photos.starred) ----------
+-- true = starred, null = not starred. Same as supabase/migrations/010_photo_starred.sql.
+alter table public.photos add column if not exists starred boolean;
+
 -- ---------- indexes (phones pull "changed since" by updated_at) ----------
 create index if not exists customers_updated_at_idx  on public.customers  (updated_at, id);
 create index if not exists rigs_updated_at_idx       on public.rigs       (updated_at, id);

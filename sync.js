@@ -76,6 +76,7 @@ function photoToRow(p) {
     operator: String(p.operator || '').trim().replace(/\s+/g, ' ') || null, // "Name Number", e.g. "Dusty 104" (migration 003)
     work_order: String(p.workOrder || '').trim() || null, // Work order # from Start inspection (migration 006)
     wire: String(p.wire || '').trim().replace(/\s+/g, ' ') || null, // hardband wire, e.g. "Duraband NC" (migration 008)
+    starred: p.starred ? true : null, // ⭐ star (migration 010_photo_starred.sql); unstarred = null
   };
 }
 function applyPhotoRow(p, r) {
@@ -106,6 +107,11 @@ function applyPhotoRow(p, r) {
   if ('wire' in r) {
     if (r.wire) p.wire = String(r.wire);
     else if (!(S.meta.wireBacklog || []).includes(r.id)) p.wire = '';
+  }
+  // Star (migration 010_photo_starred.sql): same rule — a null only clears it when this phone has no star still to upload.
+  if ('starred' in r) {
+    if (r.starred) p.starred = true;
+    else if (!(S.meta.starredBacklog || []).includes(r.id)) delete p.starred;
   }
   if (r.deleted_at) p.deletedAt = tsMs(r.deleted_at); else delete p.deletedAt;
   if (!('blob' in p)) p.blob = null;
@@ -168,9 +174,9 @@ async function sbFetch(path, { method = 'GET', headers = {}, body, timeout } = {
 // (006_photo_work_order.sql). Until a migration is
 // run, PostgREST answers 400 PGRST204 "Could not find the 'stage' column of 'photos' in the schema cache"
 // (42703 "column photos.stage does not exist" on a select). missingCol() tells which column the server lacks.
-const OPT_COLS = ['stage', 'operator', 'work_order', 'wire']; // + wire (008_wire.sql)
+const OPT_COLS = ['stage', 'operator', 'work_order', 'wire', 'starred']; // + wire (008_wire.sql), starred (010_photo_starred.sql)
 // Name used for each column's Sync flags (<name>Col / <name>CheckedAt) and its meta.<name>Backlog list.
-const COL_KEY = { stage: 'stage', operator: 'operator', work_order: 'photoWorkOrder', wire: 'wire' };
+const COL_KEY = { stage: 'stage', operator: 'operator', work_order: 'photoWorkOrder', wire: 'wire', starred: 'starred' };
 // Reject columns added by later migrations: work_order (005_reject_work_order.sql). Same detection as for photos.
 const REJECT_OPT_COLS = ['work_order'];
 const missingCol = (e, cols = OPT_COLS) => {
@@ -193,7 +199,7 @@ const downloadObj = async (path) => { const res = await sbFetch(objPath(path), {
 
 /* ---------- the engine ---------- */
 const Sync = {
-  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, operatorCol: null, operatorCheckedAt: 0, photoWorkOrderCol: null, photoWorkOrderCheckedAt: 0, wireCol: null, wireCheckedAt: 0, workOrderCol: null, workOrderCheckedAt: 0, rejectsTable: null, rejectsCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
+  on: HB_CFG.on, stageCol: null, stageCheckedAt: 0, operatorCol: null, operatorCheckedAt: 0, photoWorkOrderCol: null, photoWorkOrderCheckedAt: 0, wireCol: null, wireCheckedAt: 0, starredCol: null, starredCheckedAt: 0, workOrderCol: null, workOrderCheckedAt: 0, rejectsTable: null, rejectsCheckedAt: 0, running: false, again: false, pending: 0, phase: '', lastError: null, lastOk: 0, timer: null, changed: false,
   get session() { return S.meta.syncSession || null; },
   get signedIn() { return !!(HB_CFG.on && this.session && this.session.refresh_token); },
 
@@ -311,6 +317,7 @@ const Sync = {
     await this.operatorCatchUp();
     await this.photoWorkOrderCatchUp();
     await this.wireCatchUp();
+    await this.starredCatchUp();
     await this.rigClosedCatchUp();
     await this.rejectsCatchUp();
     await this.workOrderCatchUp();
@@ -426,6 +433,11 @@ const Sync = {
   photoWorkOrderCatchUp() {
     return this.fillInLater({ table: 'photos', col: 'work_order', flag: 'photoWorkOrder', backlogKey: 'photoWorkOrderBacklog',
       valueOf: async (id) => { const p = await photoRecord(id); return p && photoToRow(p).work_order; } });
+  },
+  // Starred photos uploaded while photos.starred was missing (010_photo_starred.sql). An unstar since then has no value → skipped.
+  starredCatchUp() {
+    return this.fillInLater({ table: 'photos', col: 'starred', flag: 'starred', backlogKey: 'starredBacklog',
+      valueOf: async (id) => { const p = await photoRecord(id); return p && photoToRow(p).starred; } });
   },
   // Photos uploaded while photos.wire was missing (008_wire.sql).
   wireCatchUp() {
@@ -650,7 +662,7 @@ const Sync = {
         const lts = stampOf('photos', p);
         if (p && dirty && lts > rts) continue;
         // (an operator filled in later by another phone's catch-up PATCH keeps the edit time, so compare it too)
-        const sameExtra = p && (!r.operator || r.operator === p.operator) && (!r.work_order || r.work_order === p.workOrder) && (!r.wire || r.wire === p.wire);
+        const sameExtra = p && (!r.operator || r.operator === p.operator) && (!r.work_order || r.work_order === p.workOrder) && (!r.wire || r.wire === p.wire) && (!r.starred || !!p.starred);
         if (p && !dirty && lts === rts && sameExtra && !!p.deletedAt === !!r.deleted_at && (p.remoteImage || !r.image_path)) continue;
         p = applyPhotoRow(p || { blob: null, thumb: null }, r);
         if (p.deletedAt) { p.blob = null; p.thumb = null; } // someone deleted it; a copy stays on the server
