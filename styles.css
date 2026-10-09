@@ -326,3 +326,5 @@ dl.kv dd { margin: 0; font-weight: 600; word-break: break-word; }
 .btn.ghost.complete-mini { flex: 0 0 auto; min-height: 32px; padding: 0 10px; font-size: 13px; font-weight: 600; border: 1.5px solid var(--line); border-radius: 16px; }
 .tile .star-badge { position: absolute; top: 4px; right: 4px; font-size: 15px; line-height: 1; padding: 3px 4px; border-radius: 8px; background: rgba(0,0,0,.45); }
 .btn.star-on { background: #fff4cc; color: var(--ink); border-color: #e0b400; }
+#postTop { margin-bottom: 12px; }
+#postTop #postHead { margin-bottom: 10px; }

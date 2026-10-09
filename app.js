@@ -1359,6 +1359,7 @@ function renderForm(mode, id) {
       <div class="field stage-field"${mode === 'add' && S.addInspect && S.inspection && S.inspection.count === 0 ? ' hidden' : ''}><span class="lbl">Stage</span><div class="seg stage multi-stages${isRepairJoint(vals.notes, vals.serialNumber, vals.end) ? ' repair-stages' : ''}" id="fStage" role="radiogroup" aria-label="Stage">${stageButtonsHTML(isRepairJoint(vals.notes, vals.serialNumber, vals.end), vals.stage === 'preheat', keepRepair)}</div>${mode === 'edit' ? '<p class="muted small" id="stageRelabelHint">Changing Stage relabels this photo. To take a new picture, use the camera buttons on the photo screen.</p>' : ''}</div>
       <div class="pre-head" id="preHead" hidden></div>
       <div class="pre-head" id="preheatHead" hidden></div>
+      <div id="postTop" hidden><div class="pre-head" id="postHead" hidden></div></div>
       <div id="mainFields">
       <div class="field" id="fldCustomer"><label for="fCustomer">Customer</label>${selectHTML('customers', 'customerId', 'fCustomer')}</div>
       <div class="field" id="fldRig"><label for="fRig">Rig</label>${selectHTML('rigs', 'rigId', 'fRig')}</div>
@@ -1405,6 +1406,12 @@ function renderForm(mode, id) {
     const rig = labelOf('rigs', ($('#fRig') && $('#fRig').value) || vals.rigId) || 'No rig';
     $('#preheatHead').innerHTML = `${stageBadge({ stage: 'preheat' })} <b>Preheat temp photo</b>${sn ? ' · SN ' + esc(sn) : ''} · 📁 ${esc(rig)} <span class="muted small">— snap and save, tags copied from this joint</span>`;
   };
+  // hbp-v34: new After photo — Save moves up under the Stage row; a serial carried from the joint shows as a one-line head.
+  const snCarried = mode === 'add' && !!String(vals.serialNumber || '').trim();
+  const drawPostHead = () => {
+    const sn = $('#fSerial').value.trim(), rig = labelOf('rigs', $('#fRig').value) || 'No rig';
+    $('#postHead').innerHTML = `${stageBadge({ stage: 'post' })} · <b>SN ${esc(sn)}</b> · 📁 ${esc(rig)}`;
+  };
   const drawStage = () => {
     $$('#fStage button').forEach((b) => { const on = b.dataset.v === stage; b.classList.toggle('on', on); b.setAttribute('aria-checked', on); });
     const ch = $('#fChips'); ch.dataset.stage = stage;
@@ -1438,6 +1445,11 @@ function renderForm(mode, id) {
       ['Customer', 'Rig', 'Operator', 'Spec', 'Wire', 'Serial', 'End', 'Band', 'Notes', 'Date'].map(fld).filter(Boolean).forEach((el) => { el.hidden = false; });
     }
     if (pre) drawHead();
+    const sb = $('#saveBtn'), top = $('#postTop'), hideSn = postTrim && snCarried;
+    if (postTrim) { if (sb.parentElement !== top) top.appendChild(sb); }
+    else if (sb.parentElement === top) $('.form-actions', $('#photoForm')).prepend(sb);
+    top.hidden = !postTrim; $('#postHead').hidden = !hideSn;
+    if (hideSn) { fld('Serial').hidden = true; drawPostHead(); }
     peekNotes();
   };
   // Rebuild the Stage button set when Repair is marked/cleared (or serial/end match a repair joint).
@@ -1489,7 +1501,7 @@ function renderForm(mode, id) {
     const sp = $('#fSpec');
     if (js && sp.value !== js && sp.querySelector(`option[value="${CSS.escape(js)}"]`)) sp.value = js;
   };
-  $('#fRig').addEventListener('change', () => { respec(); if (stage === 'pre') drawHead(); });
+  $('#fRig').addEventListener('change', () => { respec(); if (stage === 'pre') drawHead(); if (!$('#postHead').hidden) drawPostHead(); });
   $('#fCustomer').addEventListener('change', respec);
   // Notes peek is text-only (safe on input). syncRepairStages reparents via appendChild and blurs iOS — blur/change only.
   $('#fNotes').addEventListener('input', peekNotes);
@@ -2291,7 +2303,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v33'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v34'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
