@@ -45,13 +45,21 @@ function lookupToRow(t, it) {
   const K = KINDS[t.kind];
   const row = { id: it.id, [K.field]: it[K.field] || '', merged_into: it.mergedInto || null, client_updated_at: Math.round(stampOf(t.store, it)) || 0,
     deleted_at: tsIso(it.deletedAt), updated_by_name: S.meta.syncName || null };
-  if (t.kind === 'rigs') row.notes = it.notes || '';
+  if (t.kind === 'rigs') { row.notes = it.notes || ''; row.closed_at = tsIso(it.closedAt); } // closed_at: Complete job (migration 009)
   return row;
 }
-function rowToLookup(t, r) {
+function rowToLookup(t, r, local) {
   const K = KINDS[t.kind];
   const it = { id: r.id, [K.field]: r[K.field] || '', updatedAt: Number(r.client_updated_at) || 0 };
   if (t.kind === 'rigs') it.notes = r.notes || '';
+  // Completed job (rigs.closed_at, 009_rigs_closed_at.sql). No key = server not migrated yet: keep this phone's value;
+  // null while this phone still has to fill it in (meta.rigClosedBacklog): keep it too.
+  if (t.kind === 'rigs') {
+    const mine = local && local.closedAt;
+    if (!('closed_at' in r)) { if (mine) it.closedAt = mine; }
+    else if (r.closed_at) it.closedAt = tsMs(r.closed_at);
+    else if (mine && (S.meta.rigClosedBacklog || []).includes(r.id)) it.closedAt = mine;
+  }
   if (r.deleted_at) it.deletedAt = tsMs(r.deleted_at);
   if (r.merged_into) it.mergedInto = r.merged_into;
   return it;
@@ -303,6 +311,7 @@ const Sync = {
     await this.operatorCatchUp();
     await this.photoWorkOrderCatchUp();
     await this.wireCatchUp();
+    await this.rigClosedCatchUp();
     await this.rejectsCatchUp();
     await this.workOrderCatchUp();
     const entries = (await db.all('outbox')).sort((a, b) => a.at - b.at);
@@ -318,7 +327,7 @@ const Sync = {
           if (!it) { await db.del('outbox', e.key); continue; }
           rows.push(lookupToRow(t, it)); used.push(e);
         }
-        if (rows.length) await upsertRows(t.table, rows);
+        if (rows.length) await (t.kind === 'rigs' ? this.upsertRigs(rows) : upsertRows(t.table, rows));
         for (const e of used) await outboxDone(e);
       }
     }
@@ -422,6 +431,31 @@ const Sync = {
   wireCatchUp() {
     return this.fillInLater({ table: 'photos', col: 'wire', flag: 'wire', backlogKey: 'wireBacklog',
       valueOf: async (id) => { const p = await photoRecord(id); return p && photoToRow(p).wire; } });
+  },
+  // rigs.closed_at (009_rigs_closed_at.sql) missing on the server: PostgREST answers 400 PGRST204. Upload the rigs without
+  // it (sync never breaks), keep the value on the phone and remember completed rigs (meta.rigClosedBacklog) so the
+  // value is filled in by a closed_at-only PATCH once the column exists (rigClosedCatchUp).
+  async upsertRigs(rows) {
+    const drop = () => rows.forEach((x) => { delete x.closed_at; });
+    if (this.rigClosedCol === false && Date.now() - (this.rigClosedCheckedAt || 0) < 300000) drop();
+    for (;;) {
+      try { await upsertRows('rigs', rows); break; }
+      catch (e) {
+        if (missingCol(e, ['closed_at']) !== 'closed_at' || !('closed_at' in rows[0])) throw e;
+        if (this.rigClosedCol !== false) console.warn('sync: server has no rigs.closed_at column yet (run 009_rigs_closed_at.sql) — uploading rigs without it');
+        this.rigClosedCol = false; this.rigClosedCheckedAt = Date.now();
+        drop();
+      }
+    }
+    if ('closed_at' in rows[0]) { this.rigClosedCol = true; return; }
+    const backlog = S.meta.rigClosedBacklog || [];
+    const add = rows.filter((r) => { const it = S.rigs.get(r.id) || S.gone.rigs.get(r.id); return it && it.closedAt && !backlog.includes(r.id); }).map((r) => r.id);
+    if (add.length) await setMeta('rigClosedBacklog', backlog.concat(add));
+  },
+  // Rigs completed while rigs.closed_at was missing (009_rigs_closed_at.sql).
+  rigClosedCatchUp() {
+    return this.fillInLater({ table: 'rigs', col: 'closed_at', flag: 'rigClosed', backlogKey: 'rigClosedBacklog',
+      valueOf: async (id) => { const it = S.rigs.get(id) || S.gone.rigs.get(id) || await db.get('rigs', id); return it && it.closedAt ? tsIso(it.closedAt) : null; } });
   },
   async pushRejects(entries) {
     if (!entries.length) return;
@@ -601,8 +635,10 @@ const Sync = {
         const local = S[t.kind].get(r.id) || S.gone[t.kind].get(r.id) || await db.get(t.store, r.id);
         const lts = stampOf(t.store, local);
         if (local && dirty && lts > rts) continue;                                   // our newer edit wins; it will upload
-        if (local && !dirty && lts === rts && !!local.deletedAt === !!r.deleted_at) continue; // already have it
-        const it = rowToLookup(t, r);
+        // (a closed_at filled in later by another phone's catch-up PATCH keeps the edit time, so compare it too)
+        const sameClosed = t.kind !== 'rigs' || !('closed_at' in r) || !!r.closed_at === !!(local && local.closedAt);
+        if (local && !dirty && lts === rts && !!local.deletedAt === !!r.deleted_at && sameClosed) continue; // already have it
+        const it = rowToLookup(t, r, local);
         await db.put(t.store, it);
         if (it.deletedAt) { S[t.kind].delete(it.id); S.gone[t.kind].set(it.id, it); }
         else { S[t.kind].set(it.id, it); S.gone[t.kind].delete(it.id); }

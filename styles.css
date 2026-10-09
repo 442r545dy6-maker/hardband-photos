@@ -320,3 +320,4 @@ dl.kv dd { margin: 0; font-weight: 600; word-break: break-word; }
 #rejList, #rejItems { margin-top: 12px; }
 #toast.has-action { display: flex; align-items: center; gap: 12px; }
 .toast-btn { flex: none; min-height: 44px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--accent); color: #111; font: inherit; font-weight: 800; cursor: pointer; }
+.done-tag { display: inline-block; font-size: 12px; font-weight: 700; color: #1e6b34; background: #e3f4e8; border-radius: 10px; padding: 1px 8px; }

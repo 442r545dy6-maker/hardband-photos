@@ -82,7 +82,7 @@ async function putPhoto(p) {
 const S = {
   rigs: new Map(), customers: new Map(), pipeSpecs: new Map(), photos: [], rejects: [], meta: {},
   gone: { rigs: new Map(), customers: new Map(), pipeSpecs: new Map() }, // deleted/merged entries (team sync tombstones)
-  search: { q: '', customerId: '', rigId: '', end: '', stage: '', op: '', from: '', to: '' }, showFilters: false,
+  search: { q: '', customerId: '', rigId: '', end: '', stage: '', op: '', from: '', to: '' }, showFilters: false, showClosed: false,
   queue: [], qIndex: 0, savedCount: 0, batchValues: null, lastSaved: null, keepJoint: false,
   pendingKeep: null, pendingStage: null, forceStage: null, keepFrom: null, addFromDetail: false, addDetailStage: null, // durable Same-joint intent until handleFiles consumes it
   context: null, addContext: null, lastListHash: '#/', lastList: [], manageTab: 'rigs',
@@ -658,6 +658,7 @@ async function createLookup(kind, vals) {
   const K = KINDS[kind];
   const name = vals[K.field].trim();
   const dup = sortedItems(kind).find((x) => x[K.field].toLowerCase() === name.toLowerCase());
+  if (dup && kind === 'rigs' && dup.closedAt) { await setRigClosed(dup.id, false); toast(`Job "${name}" reopened.`); return dup; }
   if (dup) { toast(`${K.label} "${name}" already exists — selected it.`); return dup; }
   const item = { id: `${K.prefix}_${uid()}`, [K.field]: name, updatedAt: Date.now() };
   if (K.notes) item.notes = vals.notes || '';
@@ -665,6 +666,17 @@ async function createLookup(kind, vals) {
   S[kind].set(item.id, item);
   markDirty(K.store, item.id);
   return item;
+}
+// Complete job (hbp-v31): a job = a rig folder. Completed rigs (closedAt) leave the open lists and pickers but are never
+// deleted; photos still open, export and sync. Synced as rigs.closed_at (009_rigs_closed_at.sql).
+async function setRigClosed(id, closed) {
+  const it = S.rigs.get(id);
+  if (!it) return;
+  const upd = { ...it, updatedAt: Date.now() };
+  if (closed) upd.closedAt = Date.now(); else delete upd.closedAt;
+  await db.put('rigs', upd); S.rigs.set(id, upd);
+  markDirty('rigs', id);
+  if (closed && S.inspection && S.inspection.rigId === id) endInspection(); // the Start new job session was on this rig
 }
 async function newLookupDialog(kind) {
   const K = KINDS[kind];
@@ -841,8 +853,8 @@ function opFilterOpts(sel) {
     list.map((o) => `<option value="${esc(o.key)}" ${o.key === sel ? 'selected' : ''}>${esc(o.label)} — ${countsText(o.n, o.r)}</option>`).join('');
 }
 const opFilterLabel = (key) => (key === '__none' ? 'No operator' : (opFilterList().list.find((o) => o.key === key) || operatorRoster().find((o) => o.key === key) || { label: key.slice(2) }).label);
-const opts = (kind, sel, blank) => (blank ? `<option value="">${esc(blank)}</option>` : '') +
-  sortedItems(kind).map((x) => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x[KINDS[kind].field])}</option>`).join('');
+const opts = (kind, sel, blank, openOnly = false) => (blank ? `<option value="">${esc(blank)}</option>` : '') +
+  sortedItems(kind).filter((x) => !(openOnly && kind === 'rigs' && x.closedAt && x.id !== sel)).map((x) => `<option value="${esc(x.id)}" ${x.id === sel ? 'selected' : ''}>${esc(x[KINDS[kind].field])}</option>`).join('');
 
 function renderHome() {
   S.lastListHash = '#/'; S.context = null;
@@ -926,8 +938,11 @@ function renderHomeBody() {
     g.get(rk).push(p);
   }
   const custs = [...groups.keys()].sort((a, b) => byText(labelOf('customers', a) || '~', labelOf('customers', b) || '~'));
-  body.innerHTML = custs.map((ck) => {
-    const rigs = groups.get(ck);
+  const isClosed = (rk) => !!(S.rigs.get(rk) || {}).closedAt;
+  const nClosed = custs.reduce((n, ck) => n + [...groups.get(ck).keys()].filter(isClosed).length, 0);
+  const section = (closed) => custs.map((ck) => {
+    const rigs = new Map([...groups.get(ck)].filter(([rk]) => isClosed(rk) === closed));
+    if (!rigs.size) return '';
     const total = [...rigs.values()].reduce((n, a) => n + a.length, 0);
     const rows = [...rigs.keys()].sort((a, b) => byText(labelOf('rigs', a) || '~', labelOf('rigs', b) || '~')).map((rk) => {
       const list = rigs.get(rk).slice().sort((a, b) => b.createdAt - a.createdAt);
@@ -935,13 +950,17 @@ function renderHomeBody() {
       const joints = new Set(list.map((p) => p.serialNumber || '')).size;
       return `<a class="folder" href="#/folder/${encodeURIComponent(ck)}/${encodeURIComponent(rk)}" data-rig="${esc(rig.name || '')}">
         <img src="${thumbUrl(list[0])}" alt="">
-        <div class="meta"><b>📁 ${esc(rig.name || 'No rig')}</b>
+        <div class="meta"><b>📁 ${esc(rig.name || 'No rig')}</b>${closed ? ' <span class="done-tag">✅ Completed</span>' : ''}
           <small>${list.length} photo${list.length === 1 ? '' : 's'} · ${joints} joint${joints === 1 ? '' : 's'} · last ${fmtShort(list[0].createdAt)}</small>
           ${rig.notes ? `<small>${esc(rig.notes)}</small>` : ''}</div>
         <span class="chev">›</span></a>`;
     }).join('');
     return `<h2 class="cust-head">${esc(labelOf('customers', ck) || 'No customer')} <span class="count">${total}</span></h2>${rows}`;
   }).join('');
+  body.innerHTML = (section(false) || '<div class="empty">No open jobs.</div>')
+    + (nClosed ? `<button type="button" class="btn ghost block" id="showClosedBtn" style="margin-top:14px">${S.showClosed ? 'Hide' : 'Show'} completed jobs (${nClosed})</button>`
+      + (S.showClosed ? `<div id="closedJobs"><h2 class="cust-head">✅ Completed jobs</h2>${section(true)}</div>` : '') : '');
+  const sc = $('#showClosedBtn'); if (sc) sc.onclick = () => { S.showClosed = !S.showClosed; renderHomeBody(); };
 }
 
 /* ================= folder ================= */
@@ -984,11 +1003,23 @@ function renderFolder(ck, rk) {
       <div style="font-size:22px;font-weight:800" id="folderRigName">${esc(rig ? rig.name : 'No rig')}</div>
       ${rig && rig.notes ? `<div class="muted small" style="margin-top:4px">${esc(rig.notes)}</div>` : ''}
       <div class="muted small" style="margin-top:6px">${list.length} photo${list.length === 1 ? '' : 's'} · ${groups.length} joint${groups.length === 1 ? '' : 's'}${list.length ? ` <span id="folderStages">${folderStageSummary(list)}</span>` : ''}. New photos taken here go in this folder.</div>
+      ${rig && rig.closedAt ? `<div class="done-tag" id="folderClosed" style="margin-top:8px">✅ Completed ${esc(fmtShort(rig.closedAt))}</div>` : ''}
       ${rig ? `<button class="btn ghost block" id="editRigBtn" style="margin-top:10px">✎ Rename / edit rig</button>` : ''}
+      ${rig ? (rig.closedAt ? `<button class="btn secondary block" id="reopenJobBtn" style="margin-top:8px">↩ Reopen job</button>`
+        : `<button class="btn secondary block" id="completeJobBtn" style="margin-top:8px">✅ Complete job</button>`) : ''}
     </div>
     ${list.length ? groups.map((g) => { const ch = g.key ? compareHash(g.ps.find((x) => stageOf(x) === 'post') || g.ps[0]) : ''; return `<div class="sn-head">${g.sn ? 'SN ' + esc(g.sn) : 'No serial number'} <span class="muted">(${g.ps.length})</span>${ch ? ` <a class="pair-mark" href="${ch}" title="Before and After photos — compare" aria-label="Compare Before / After">⇄</a>` : ''}</div>
       <div class="grid">${g.ps.map((p) => tileHTML(p, false)).join('')}</div>`; }).join('') : '<div class="empty">No photos in this folder.</div>'}`;
   const eb = $('#editRigBtn'); if (eb) eb.onclick = () => editLookupDialog('rigs', rk);
+  const cj = $('#completeJobBtn');
+  if (cj) cj.onclick = async () => {
+    const ask = confirmBox({ title: `Mark ${rig.name} complete?`, msg: 'Its photos stay saved; it just moves off the open list.', ok: 'Complete' });
+    setTimeout(() => { const no = $('#confirmNo'); if (no) no.focus(); }, 0); // Cancel is the default
+    if (!(await ask)) return;
+    await setRigClosed(rk, true); toast(`${rig.name} completed`); route();
+  };
+  const rj = $('#reopenJobBtn');
+  if (rj) rj.onclick = async () => { await setRigClosed(rk, false); toast(`${rig.name} reopened`); route(); };
 }
 
 /* ================= photo detail ================= */
@@ -1293,6 +1324,8 @@ function renderForm(mode, id) {
     if (wireKey(vals.wire) === wireKey(WIRE_INLAY) && S.addKeep && S.lastSaved && stageOf(S.lastSaved) === 'inlay') vals.wire = jointNormalWire(vals.serialNumber, vals.end);
     vals.wireNormal = wireKey(vals.wire) === wireKey(WIRE_INLAY) ? '' : vals.wire;
     if (vals.stage === 'inlay') vals.wire = canonWire(WIRE_INLAY);
+    // A completed job is never the default rig for a new joint (same-joint photos keep their rig).
+    if (!S.addKeep && vals.rigId && (S.rigs.get(vals.rigId) || {}).closedAt) vals.rigId = '';
     // End pre-filled with no band: use that end's default band (never overwrite a carried band).
     if (!vals.bandNumber && END_BAND[vals.end]) vals.bandNumber = END_BAND[vals.end];
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
@@ -1303,7 +1336,7 @@ function renderForm(mode, id) {
   const src = srcBlob ? viewUrl(srcBlob) : '';
   const remaining = mode === 'add' ? S.queue.length - S.qIndex : 0;
   const serials = [...new Set(S.photos.filter((x) => x.rigId === vals.rigId && x.serialNumber).sort((a, b) => b.createdAt - a.createdAt).map((x) => x.serialNumber))].slice(0, 30);
-  const selectHTML = (kind, key, idAttr) => `<select id="${idAttr}" data-kind="${kind}">${vals[key] ? '' : '<option value="">— choose —</option>'}${opts(kind, vals[key])}<option value="__new">＋ New ${KINDS[kind].label.toLowerCase()}…</option></select>`;
+  const selectHTML = (kind, key, idAttr) => `<select id="${idAttr}" data-kind="${kind}">${vals[key] ? '' : '<option value="">— choose —</option>'}${opts(kind, vals[key], '', true)}<option value="__new">＋ New ${KINDS[kind].label.toLowerCase()}…</option></select>`;
   view.innerHTML = `
     <img class="preview" src="${src}" alt="Photo preview">
     <p class="qinfo">${mode === 'add' ? `Taken ${fmtDate(item.createdAt)}${item.dateSource === 'exif' ? ' (from photo)' : ''}` : ''}</p>
@@ -1729,7 +1762,7 @@ const cleanName = (x) => String(x || '').trim().replace(/\s+/g, ' ');
 const findLookup = (kind, name) => sortedItems(kind).find((x) => normName2(x[KINDS[kind].field]) === normName2(name));
 function pickNewHTML(id, kind, sel, blank, label, newLabel, ph) {
   return `<div class="field"><label for="${id}">${esc(label)}</label>
-    <select id="${id}"><option value="" ${sel ? '' : 'selected'}>${esc(blank)}</option><option value="__new">${esc(newLabel)}</option>${opts(kind, sel)}</select>
+    <select id="${id}"><option value="" ${sel ? '' : 'selected'}>${esc(blank)}</option><option value="__new">${esc(newLabel)}</option>${opts(kind, sel, '', true)}</select>
     <input id="${id}New" type="text" maxlength="80" placeholder="${esc(ph)}" autocapitalize="words" autocorrect="off" spellcheck="false" autocomplete="off" enterkeyhint="done" hidden>
     <div class="small insp-msg" id="${id}Msg" role="alert"></div></div>`;
 }
@@ -2252,7 +2285,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v30'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v31'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {

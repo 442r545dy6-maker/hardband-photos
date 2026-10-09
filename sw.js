@@ -1,6 +1,6 @@
 /* Hardband Photos service worker: caches the app shell so the app opens offline.
-   Bump VERSION whenever app files change so phones pick up the new copy. build: v30-quick-batch */
-const VERSION = 'hbp-v30';
+   Bump VERSION whenever app files change so phones pick up the new copy. build: v31-complete-job */
+const VERSION = 'hbp-v31';
 const SHELL = [
   './',
   './index.html',
