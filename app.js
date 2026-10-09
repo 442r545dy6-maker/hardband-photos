@@ -1412,16 +1412,17 @@ function renderForm(mode, id) {
   let addStar = false;
   const asb = mode === 'add' ? document.createElement('button') : null;
   if (asb) {
-    Object.assign(asb, { type: 'button', id: 'addStarBtn', className: 'add-star', textContent: '☆' });
+    Object.assign(asb, { type: 'button', id: 'addStarBtn', className: 'add-star', textContent: '★' }); // hbp-v36: solid star both ways — gold = not starred yet (tap me), dark pill + gray = starred
     asb.setAttribute('aria-label', 'Star this photo'); asb.setAttribute('aria-pressed', 'false');
-    asb.onclick = () => { addStar = !addStar; asb.textContent = addStar ? '⭐' : '☆'; asb.classList.toggle('on', addStar); asb.setAttribute('aria-pressed', String(addStar)); };
+    asb.onclick = () => { addStar = !addStar; asb.classList.toggle('on', addStar); asb.setAttribute('aria-pressed', String(addStar)); asb.setAttribute('aria-label', addStar ? 'Starred' : 'Star this photo'); };
   }
   const placeStar = () => {
     if (!asb) return;
     const head = ['#preHead', '#preheatHead', '#postHead'].map((x) => $(x)).find((h) => h && !h.hidden && !(h.id === 'postHead' && $('#postTop').hidden));
     const slot = $('#starSlot');
     slot.hidden = !!head;
-    (head || slot).prepend(asb);
+    ['#preHead', '#preheatHead', '#postHead', '#starSlot'].forEach((x) => { const h = $(x); if (h) h.classList.toggle('has-star', h === (head || slot)); });
+    (head || slot).appendChild(asb); // right end of the head line (absolutely placed, so the text still ellipsizes)
   };
   // hbp-v34: new After photo — Save moves up under the Stage row; a serial carried from the joint shows as a one-line head.
   const snCarried = mode === 'add' && !!String(vals.serialNumber || '').trim();
@@ -2323,7 +2324,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v35'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v36'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {

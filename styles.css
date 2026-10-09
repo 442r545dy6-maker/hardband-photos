@@ -328,5 +328,6 @@ dl.kv dd { margin: 0; font-weight: 600; word-break: break-word; }
 .btn.star-on { background: #fff4cc; color: var(--ink); border-color: #e0b400; }
 #postTop { margin-bottom: 12px; }
 #postTop #postHead { margin-bottom: 10px; }
-.add-star { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; min-height: 40px; margin: 0 6px 0 0; padding: 0; border: 1.5px solid var(--line); border-radius: 20px; background: var(--card); font-size: 20px; line-height: 1; vertical-align: middle; cursor: pointer; }
-.add-star.on { background: #fff4cc; border-color: #e0b400; }
+.pre-head.has-star { position: relative; padding-right: 50px; min-height: 40px; line-height: 40px; }
+.add-star { position: absolute; right: 0; top: 50%; transform: translateY(-50%); display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0; border: 1.5px solid #e0b400; border-radius: 20px; background: #fff8dc; color: #f5b301; font-size: 24px; line-height: 1; cursor: pointer; }
+.add-star.on { background: #3c4043; border-color: #3c4043; color: #c4c7c5; }
