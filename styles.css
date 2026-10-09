@@ -109,7 +109,7 @@ body.with-insp-btn { padding-bottom: calc(170px + var(--safe-b)); }
 .insp-op { font-weight: 600; }
 .pre-head-op { white-space: nowrap; }
 .op-clear { min-height: 40px; padding: 0 10px; margin-left: 6px; font-size: 15px; }
-#bottombar #libBtn { flex: 1; white-space: nowrap; padding: 0 10px; }
+#bottombar #libBtn { display: none; } /* hbp-v32: Library lives on the Tools page; Take Photo takes the full width */
 #fSerial { text-transform: uppercase; font-weight: 700; letter-spacing: .5px; }
 #fSerial::placeholder { text-transform: none; font-weight: 400; letter-spacing: 0; }
 
@@ -321,3 +321,6 @@ dl.kv dd { margin: 0; font-weight: 600; word-break: break-word; }
 #toast.has-action { display: flex; align-items: center; gap: 12px; }
 .toast-btn { flex: none; min-height: 44px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--accent); color: #111; font: inherit; font-weight: 800; cursor: pointer; }
 .done-tag { display: inline-block; font-size: 12px; font-weight: 700; color: #1e6b34; background: #e3f4e8; border-radius: 10px; padding: 1px 8px; }
+.folder-head { display: flex; align-items: flex-start; gap: 8px; }
+.folder-head-l { flex: 1; min-width: 0; }
+.btn.ghost.complete-mini { flex: 0 0 auto; min-height: 32px; padding: 0 10px; font-size: 13px; font-weight: 600; border: 1.5px solid var(--line); border-radius: 16px; }

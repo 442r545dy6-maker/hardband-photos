@@ -994,23 +994,25 @@ function renderFolder(ck, rk) {
   const rig = S.rigs.get(rk);
   S.context = { customerId: ck, rigId: rk };
   S.lastListHash = location.hash;
-  setChrome({ title: `${labelOf('customers', ck) || 'No customer'} / ${rig ? rig.name : 'No rig'}`, back: '#/', bottom: true });
+  setChrome({ title: `${labelOf('customers', ck) || 'No customer'} / ${rig ? rig.name : 'No rig'}`, back: '#/', bottom: false }); // hbp-v32: Next joint in the card covers capture
   const groups = jointGroups(list);
   S.lastList = groups.flatMap((g) => g.ps.map((p) => p.id));
   view.innerHTML = `
     <div class="card">
-      <div class="muted small">${esc(labelOf('customers', ck) || 'No customer')}</div>
-      <div style="font-size:22px;font-weight:800" id="folderRigName">${esc(rig ? rig.name : 'No rig')}</div>
+      <div class="folder-head"><div class="folder-head-l"><div class="muted small">${esc(labelOf('customers', ck) || 'No customer')}</div>
+      <div style="font-size:22px;font-weight:800" id="folderRigName">${esc(rig ? rig.name : 'No rig')}</div></div>
+      ${rig && !rig.closedAt ? `<button type="button" class="btn ghost complete-mini" id="completeJobBtn" aria-label="Complete job">✅ Complete</button>` : ''}</div>
       ${rig && rig.notes ? `<div class="muted small" style="margin-top:4px">${esc(rig.notes)}</div>` : ''}
       <div class="muted small" style="margin-top:6px">${list.length} photo${list.length === 1 ? '' : 's'} · ${groups.length} joint${groups.length === 1 ? '' : 's'}${list.length ? ` <span id="folderStages">${folderStageSummary(list)}</span>` : ''}. New photos taken here go in this folder.</div>
       ${rig && rig.closedAt ? `<div class="done-tag" id="folderClosed" style="margin-top:8px">✅ Completed ${esc(fmtShort(rig.closedAt))}</div>` : ''}
-      ${rig ? `<button class="btn ghost block" id="editRigBtn" style="margin-top:10px">✎ Rename / edit rig</button>` : ''}
-      ${rig ? (rig.closedAt ? `<button class="btn secondary block" id="reopenJobBtn" style="margin-top:8px">↩ Reopen job</button>`
-        : `<button class="btn secondary block" id="completeJobBtn" style="margin-top:8px">✅ Complete job</button>`) : ''}
+      <label for="camInput" class="btn primary big block" data-keep="0" id="folderNextJointBtn" style="margin-top:10px">📷 Next joint</label>
+      ${rig && rig.closedAt ? `<button class="btn secondary block" id="reopenJobBtn" style="margin-top:8px">↩ Reopen job</button>` : ''}
     </div>
     ${list.length ? groups.map((g) => { const ch = g.key ? compareHash(g.ps.find((x) => stageOf(x) === 'post') || g.ps[0]) : ''; return `<div class="sn-head">${g.sn ? 'SN ' + esc(g.sn) : 'No serial number'} <span class="muted">(${g.ps.length})</span>${ch ? ` <a class="pair-mark" href="${ch}" title="Before and After photos — compare" aria-label="Compare Before / After">⇄</a>` : ''}</div>
       <div class="grid">${g.ps.map((p) => tileHTML(p, false)).join('')}</div>`; }).join('') : '<div class="empty">No photos in this folder.</div>'}`;
-  const eb = $('#editRigBtn'); if (eb) eb.onclick = () => editLookupDialog('rigs', rk);
+  // Next joint into this folder (S.context = this customer / rig), starts as Before. Armed like the Saved screen's CTAs.
+  const nj = $('#folderNextJointBtn'), armNj = () => { armKeepFromEl(nj); S.keepFrom = null; };
+  nj.addEventListener('pointerdown', armNj); nj.addEventListener('touchstart', armNj, { passive: true }); nj.addEventListener('click', armNj);
   const cj = $('#completeJobBtn');
   if (cj) cj.onclick = async () => {
     const ask = confirmBox({ title: `Mark ${rig.name} complete?`, msg: 'Its photos stay saved; it just moves off the open list.', ok: 'Complete' });
@@ -1666,13 +1668,16 @@ function renderTools() {
   const folder = S.lastListHash && S.lastListHash.startsWith('#/folder/') ? S.lastListHash
     : ls ? `#/folder/${encodeURIComponent(ls.customerId || '')}/${encodeURIComponent(ls.rigId || '')}`
     : `#/folder/${encodeURIComponent(lu.customerId || '')}/${encodeURIComponent(lu.rigId || '')}`;
+  const rigId = decodeURIComponent(folder.split('/')[3] || ''), rig = S.rigs.get(rigId);
   view.innerHTML = `<div class="stack" id="toolsPage">
       <label for="libInput" class="btn secondary big block" id="toolsLibBtn">🖼 Add from library</label>
       <a class="btn secondary big block" id="toolsFolderBtn" href="${folder}">📁 Open folder</a>
+      ${rig ? `<button type="button" class="btn secondary block" id="toolsRenameBtn">✎ Rename / edit rig (${esc(rig.name)})</button>` : ''}
       <a class="btn ghost block" href="#/">Home</a>
     </div>`;
   const lb = $('#toolsLibBtn'), fresh = () => { S.keepJoint = false; S.pendingKeep = false; S.pendingStage = null; S.keepFrom = null; };
   lb.addEventListener('pointerdown', fresh); lb.addEventListener('touchstart', fresh, { passive: true });
+  const rb = $('#toolsRenameBtn'); if (rb) rb.onclick = () => editLookupDialog('rigs', rigId);
 }
 async function handleFiles(fileList, fromCamera = false) {
   const files = Array.from(fileList || []).filter((f) => !f.type || f.type.startsWith('image/') || /\.(jpe?g|png|heic|heif|webp)$/i.test(f.name));
@@ -2285,7 +2290,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v31'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v32'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
