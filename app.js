@@ -1064,16 +1064,16 @@ function renderPhoto(id) {
     </div>
     <div class="card" style="margin-top:12px">
       <dl class="kv" id="detailFields">
-        <dt>Stage</dt><dd id="detailStage">${stageBadge(p)} ${esc(STAGES[stageOf(p)].label)}</dd>
         <dt>Operator</dt><dd id="detailOp">${opLinkHTML(p)}</dd>
-        <dt>Customer</dt><dd>${esc(labelOf('customers', p.customerId) || '—')}</dd>
-        <dt>Rig</dt><dd>${esc(rig.name || '—')}${rig.notes ? `<div class="muted small">${esc(rig.notes)}</div>` : ''}</dd>
-        <dt>Pipe spec</dt><dd>${esc(labelOf('pipeSpecs', p.pipeSpecId) || '—')}</dd>
-        <dt>Wire</dt><dd id="detailWire">${esc(p.wire || '—')}</dd>
         <dt>Serial #</dt><dd>${esc(p.serialNumber || '—')}</dd>
+        <dt>Rig</dt><dd>${esc(rig.name || '—')}${rig.notes ? `<div class="muted small">${esc(rig.notes)}</div>` : ''}</dd>
+        <dt>Customer</dt><dd>${esc(labelOf('customers', p.customerId) || '—')}</dd>
         <dt>End</dt><dd>${esc(p.end || '—')}</dd>
         <dt>Band</dt><dd>${p.bandNumber ? (p.bandNumber === 'All' ? 'All / whole connection' : 'Band ' + esc(p.bandNumber)) : '—'}</dd>
+        <dt>Pipe spec</dt><dd>${esc(labelOf('pipeSpecs', p.pipeSpecId) || '—')}</dd>
+        <dt>Wire</dt><dd id="detailWire">${esc(p.wire || '—')}</dd>
         <dt>Condition</dt><dd style="white-space:pre-wrap">${esc(p.notes || '—')}</dd>
+        <dt>Stage</dt><dd id="detailStage">${stageBadge(p)} ${esc(STAGES[stageOf(p)].label)}</dd>
         <dt>Taken</dt><dd>${fmtDate(p.createdAt)}${p.dateSource === 'capture' ? ' <span class="muted small">(save time)</span>' : ''}</dd>
       </dl>
     </div>
@@ -2342,7 +2342,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v38'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v39'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
