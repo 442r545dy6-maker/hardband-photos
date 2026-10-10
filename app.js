@@ -1053,6 +1053,7 @@ function renderPhoto(id) {
   const rig = S.rigs.get(p.rigId) || {};
   const canShare = !!(navigator.canShare && window.File);
   const capHTML = rigReadOnly(p.rigId) ? '' : detailCaptureHTML(p);
+  const st = stageOf(p); // hbp-v41: Before has no Open folder; After has no Open folder and no Delete
   const ro = rigReadOnly(p.rigId); // hbp-v38: completed job — viewing only (Prev/Next, Compare, Share)
   view.innerHTML = `
     <img class="detail-img" id="detailImg" src="${p.blob ? viewUrl(p.blob) : p.thumb ? viewUrl(p.thumb) : ''}" alt="Hardband photo">
@@ -1073,7 +1074,7 @@ function renderPhoto(id) {
         <dt>Pipe spec</dt><dd>${esc(labelOf('pipeSpecs', p.pipeSpecId) || '—')}</dd>
         <dt>Wire</dt><dd id="detailWire">${esc(p.wire || '—')}</dd>
         <dt>Condition</dt><dd style="white-space:pre-wrap">${esc(p.notes || '—')}</dd>
-        <dt>Stage</dt><dd id="detailStage">${stageBadge(p)} ${esc(STAGES[stageOf(p)].label)}</dd>
+        <dt>Stage</dt><dd id="detailStage">${stageBadge(p)}</dd>
         <dt>Taken</dt><dd>${fmtDate(p.createdAt)}${p.dateSource === 'capture' ? ' <span class="muted small">(save time)</span>' : ''}</dd>
       </dl>
     </div>
@@ -1083,8 +1084,8 @@ function renderPhoto(id) {
       ${ro ? `<p class="muted small" id="roNote" style="text-align:center">${p.starred ? '⭐ Starred · ' : ''}Completed — view only</p>` : `<button type="button" class="btn ${p.starred ? 'star-on' : 'secondary'} block" id="starBtn" aria-pressed="${!!p.starred}">${p.starred ? '⭐ Starred' : '☆ Star'}</button>
       <a class="btn ${capHTML ? 'secondary' : 'primary big'} block" id="editBtn" href="#/edit/${encodeURIComponent(p.id)}">✎ Edit details / move</a>`}
       ${canShare ? '<button class="btn secondary block" id="shareBtn">⇪ Share / save to Photos</button>' : ''}
-      ${ro ? '' : `<a class="btn ghost block" id="detailFolderBtn" href="${folderHash}">📁 Open folder</a>
-      <button class="btn danger block" id="delBtn">🗑 Delete photo</button>`}
+      ${ro || st === 'pre' || st === 'post' ? '' : `<a class="btn ghost block" id="detailFolderBtn" href="${folderHash}">📁 Open folder</a>`}
+      ${ro || st === 'post' ? '' : '<button class="btn danger block" id="delBtn">🗑 Delete photo</button>'}
     </div>`;
   // Same arming as the Saved-screen CTAs (pointerdown/touchstart fire before the camera sheet steals the page).
   $$('#detailCapture [data-keep]').forEach((l) => {
@@ -2344,7 +2345,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v40'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v41'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {

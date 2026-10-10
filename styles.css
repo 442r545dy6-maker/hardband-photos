@@ -331,3 +331,8 @@ dl.kv dd { margin: 0; font-weight: 600; word-break: break-word; }
 .pre-head.has-star { position: relative; padding-right: 64px; min-height: 52px; line-height: 52px; }
 .add-star { position: absolute; right: 0; top: 50%; transform: translateY(-50%); display: inline-flex; align-items: center; justify-content: center; width: 52px; height: 52px; padding: 0; border: 2px solid #e0b400; border-radius: 26px; background: #fff8dc; color: #f5b301; font-size: 34px; line-height: 1; cursor: pointer; }
 .add-star.on { background: #3c4043; border-color: #3c4043; color: #c4c7c5; }
+/* hbp-v41: photo detail info ~1.25x for one-hand reading */
+#detailFields dt { font-size: 19px; align-self: center; }
+#detailFields dd { font-size: 22px; }
+#detailFields .op-link { font-size: 22px; }
+#detailFields .stage-badge { font-size: 16px; }
