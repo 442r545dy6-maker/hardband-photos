@@ -1673,6 +1673,8 @@ function renderSaved() {
     <div class="stack">
       ${(() => {
         const sn = p.serialNumber || '', st = stageOf(p), snTxt = sn ? ` (SN ${esc(sn)})` : '';
+        // After saved (hbp-v40): the joint is done — just Next joint (primary), then Home / Tools. No Same joint.
+        if (st === 'post') return `<label for="camInput" class="btn primary big block" data-keep="0" id="nextJointBtn">📷 Next joint</label>`;
         // Batch work (photo taken from a photo's detail screen): offer this joint's remaining missing stages, then Next joint.
         if (S.addFromDetail && sn) {
           const btns = jointCaptureButtons(p, 'saved');
@@ -2342,7 +2344,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v39'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v40'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
