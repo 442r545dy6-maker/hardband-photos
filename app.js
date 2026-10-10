@@ -1,6 +1,9 @@
 /* Hardband Photos — vanilla JS, on-device (IndexedDB) photo log for drill-pipe hardband inspections. */
 'use strict';
 
+// Dusty 2026-10-10: completed jobs are view-only (no star, edit, delete, capture, reopen); flip to false to allow edits again (v37 behavior).
+const COMPLETED_JOBS_READ_ONLY = true;
+
 /* ================= helpers ================= */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -658,6 +661,7 @@ async function createLookup(kind, vals) {
   const K = KINDS[kind];
   const name = vals[K.field].trim();
   const dup = sortedItems(kind).find((x) => x[K.field].toLowerCase() === name.toLowerCase());
+  if (dup && kind === 'rigs' && dup.closedAt && COMPLETED_JOBS_READ_ONLY) { toast(`Job "${name}" is completed (view only) — pick or add another rig.`, 5000); return null; }
   if (dup && kind === 'rigs' && dup.closedAt) { await setRigClosed(dup.id, false); toast(`Job "${name}" reopened.`); return dup; }
   if (dup) { toast(`${K.label} "${name}" already exists — selected it.`); return dup; }
   const item = { id: `${K.prefix}_${uid()}`, [K.field]: name, updatedAt: Date.now() };
@@ -753,7 +757,10 @@ async function removeLookup(kind, id, mergedInto) {
   if (mergedInto) tomb.mergedInto = mergedInto;
   await db.put(K.store, tomb); S.gone[kind].set(id, tomb); markDirty(K.store, id);
 }
+const rigClosed = (rigId) => !!(rigId && (S.rigs.get(rigId) || {}).closedAt);
+const rigReadOnly = (rigId) => COMPLETED_JOBS_READ_ONLY && rigClosed(rigId); // hbp-v38: completed job = view only
 async function removePhoto(p) {
+  if (rigReadOnly(p.rigId)) throw new Error('Completed job — view only.'); // hbp-v38
   S.photos = S.photos.filter((x) => x.id !== p.id);
   dropThumb(p.id);
   if (!HB_CFG.on) { await db.del('photos', p.id); return; }
@@ -786,7 +793,11 @@ function route() {
     else if (v === 'folder') renderFolder(parts[1], parts[2]);
     else if (v === 'photo') renderPhoto(parts[1]);
     else if (v === 'compare') renderCompare(parts[1], parts[2]);
-    else if (v === 'edit') renderForm('edit', parts[1]);
+    else if (v === 'edit') {
+      const ep = S.photos.find((x) => x.id === parts[1]);
+      if (ep && rigReadOnly(ep.rigId)) { history.replaceState(null, '', `#/photo/${encodeURIComponent(ep.id)}`); renderPhoto(ep.id); toast('Completed job — view only'); } // hbp-v38
+      else renderForm('edit', parts[1]);
+    }
     else if (v === 'add') renderForm('add');
     else if (v === 'saved') renderSaved();
     else if (v === 'tools') renderTools();
@@ -995,6 +1006,7 @@ function renderFolder(ck, rk) {
   const rig = S.rigs.get(rk);
   S.context = { customerId: ck, rigId: rk };
   S.lastListHash = location.hash;
+  const folderRo = rigReadOnly(rk);
   setChrome({ title: `${labelOf('customers', ck) || 'No customer'} / ${rig ? rig.name : 'No rig'}`, back: '#/', bottom: false }); // hbp-v32: Next joint in the card covers capture
   const groups = jointGroups(list);
   S.lastList = groups.flatMap((g) => g.ps.map((p) => p.id));
@@ -1002,12 +1014,12 @@ function renderFolder(ck, rk) {
     <div class="card">
       <div class="folder-head"><div class="folder-head-l"><div class="muted small">${esc(labelOf('customers', ck) || 'No customer')}</div>
       <div style="font-size:22px;font-weight:800" id="folderRigName">${esc(rig ? rig.name : 'No rig')}</div></div>
-      ${rig && !rig.closedAt ? `<button type="button" class="btn ghost complete-mini" id="completeJobBtn" aria-label="Complete job">✅ Complete</button>` : ''}</div>
+      ${rig && !rig.closedAt && !folderRo ? `<button type="button" class="btn ghost complete-mini" id="completeJobBtn" aria-label="Complete job">✅ Complete</button>` : ''}</div>
       ${rig && rig.notes ? `<div class="muted small" style="margin-top:4px">${esc(rig.notes)}</div>` : ''}
       <div class="muted small" style="margin-top:6px">${all.length} photo${list.length === 1 ? '' : 's'} · ${groups.length} joint${groups.length === 1 ? '' : 's'}${list.length ? ` <span id="folderStages">${folderStageSummary(list)}</span>` : ''}. New photos taken here go in this folder.</div>
       ${rig && rig.closedAt ? `<div class="done-tag" id="folderClosed" style="margin-top:8px">✅ Completed ${esc(fmtShort(rig.closedAt))}</div>` : ''}
-      <label for="camInput" class="btn primary big block" data-keep="0" id="folderNextJointBtn" style="margin-top:10px">📷 Next joint</label>
-      ${rig && rig.closedAt ? `<button class="btn secondary block" id="reopenJobBtn" style="margin-top:8px">↩ Reopen job</button>` : ''}
+      ${folderRo ? '<div class="muted small" id="folderViewOnly" style="margin-top:8px">Completed — view only</div>' : `<label for="camInput" class="btn primary big block" data-keep="0" id="folderNextJointBtn" style="margin-top:10px">📷 Next joint</label>`}
+      ${rig && rig.closedAt && !folderRo ? `<button class="btn secondary block" id="reopenJobBtn" style="margin-top:8px">↩ Reopen job</button>` : ''}
     </div>
     ${nStar ? `<button type="button" class="btn ${starOnly ? 'primary' : 'secondary'} block" id="starFilterBtn" aria-pressed="${starOnly}" style="margin-top:10px">${starOnly ? '← All photos' : `⭐ Starred (${nStar})`}</button>` : ''}
     ${starOnly ? `<div class="muted small" id="starOnlyNote" style="margin:6px 2px 0">Showing ${nStar} starred photo${nStar === 1 ? '' : 's'}.</div>` : ''}
@@ -1015,7 +1027,7 @@ function renderFolder(ck, rk) {
       <div class="grid">${g.ps.map((p) => tileHTML(p, false)).join('')}</div>`; }).join('') : '<div class="empty">No photos in this folder.</div>'}`;
   // Next joint into this folder (S.context = this customer / rig), starts as Before. Armed like the Saved screen's CTAs.
   const nj = $('#folderNextJointBtn'), armNj = () => { armKeepFromEl(nj); S.keepFrom = null; };
-  nj.addEventListener('pointerdown', armNj); nj.addEventListener('touchstart', armNj, { passive: true }); nj.addEventListener('click', armNj);
+  if (nj) { nj.addEventListener('pointerdown', armNj); nj.addEventListener('touchstart', armNj, { passive: true }); nj.addEventListener('click', armNj); }
   const sf = $('#starFilterBtn');
   if (sf) sf.onclick = () => { S.starOnly = starOnly ? null : fkey; route(); };
   const cj = $('#completeJobBtn');
@@ -1040,7 +1052,8 @@ function renderPhoto(id) {
   setChrome({ title: p.serialNumber ? `SN ${p.serialNumber}` : 'Photo', back: S.lastListHash && S.lastListHash !== location.hash ? S.lastListHash : folderHash, bottom: false });
   const rig = S.rigs.get(p.rigId) || {};
   const canShare = !!(navigator.canShare && window.File);
-  const capHTML = detailCaptureHTML(p);
+  const capHTML = rigReadOnly(p.rigId) ? '' : detailCaptureHTML(p);
+  const ro = rigReadOnly(p.rigId); // hbp-v38: completed job — viewing only (Prev/Next, Compare, Share)
   view.innerHTML = `
     <img class="detail-img" id="detailImg" src="${p.blob ? viewUrl(p.blob) : p.thumb ? viewUrl(p.thumb) : ''}" alt="Hardband photo">
     ${p.blob ? '' : `<p class="muted small" id="fullNote" style="text-align:center">Loading full-size photo…</p>`}
@@ -1067,11 +1080,11 @@ function renderPhoto(id) {
     <div class="stack form-actions">
       ${compareHash(p) ? `<a class="btn secondary block" id="compareBtn" href="${compareHash(p)}">⇄ Compare Before / After</a>` : ''}
       ${capHTML}
-      <button type="button" class="btn ${p.starred ? 'star-on' : 'secondary'} block" id="starBtn" aria-pressed="${!!p.starred}">${p.starred ? '⭐ Starred' : '☆ Star'}</button>
-      <a class="btn ${capHTML ? 'secondary' : 'primary big'} block" id="editBtn" href="#/edit/${encodeURIComponent(p.id)}">✎ Edit details / move</a>
+      ${ro ? `<p class="muted small" id="roNote" style="text-align:center">${p.starred ? '⭐ Starred · ' : ''}Completed — view only</p>` : `<button type="button" class="btn ${p.starred ? 'star-on' : 'secondary'} block" id="starBtn" aria-pressed="${!!p.starred}">${p.starred ? '⭐ Starred' : '☆ Star'}</button>
+      <a class="btn ${capHTML ? 'secondary' : 'primary big'} block" id="editBtn" href="#/edit/${encodeURIComponent(p.id)}">✎ Edit details / move</a>`}
       ${canShare ? '<button class="btn secondary block" id="shareBtn">⇪ Share / save to Photos</button>' : ''}
-      <a class="btn ghost block" href="${folderHash}">📁 Open folder</a>
-      <button class="btn danger block" id="delBtn">🗑 Delete photo</button>
+      ${ro ? '' : `<a class="btn ghost block" id="detailFolderBtn" href="${folderHash}">📁 Open folder</a>
+      <button class="btn danger block" id="delBtn">🗑 Delete photo</button>`}
     </div>`;
   // Same arming as the Saved-screen CTAs (pointerdown/touchstart fire before the camera sheet steals the page).
   $$('#detailCapture [data-keep]').forEach((l) => {
@@ -1089,7 +1102,8 @@ function renderPhoto(id) {
     }).catch(() => { const note = $('#fullNote'); if (note) note.textContent = 'Full-size photo will download when you are online.'; });
   }
   // ⭐ Star: one tap toggles, no confirm. Only the star (and the edit time sync needs) changes.
-  $('#starBtn').onclick = async () => {
+  if ($('#starBtn')) $('#starBtn').onclick = async () => {
+    if (rigReadOnly(p.rigId)) return;
     if (p.starred) delete p.starred; else p.starred = true;
     p.updatedAt = Date.now();
     const b = $('#starBtn'); b.className = `btn ${p.starred ? 'star-on' : 'secondary'} block`; b.textContent = p.starred ? '⭐ Starred' : '☆ Star'; b.setAttribute('aria-pressed', String(!!p.starred));
@@ -1103,7 +1117,7 @@ function renderPhoto(id) {
     if (!navigator.canShare({ files: [f] })) return toast('Sharing files is not supported here.');
     try { await navigator.share({ files: [f], title: exportFileName(p) }); } catch (e) { /* cancelled */ }
   };
-  $('#delBtn').onclick = async () => {
+  if ($('#delBtn')) $('#delBtn').onclick = async () => {
     const msg = Sync.on ? 'This removes it from the team library on every phone. (A copy is kept on the team server.)' : 'This permanently removes it from this device. It cannot be undone (unless it is in a backup ZIP).';
     if (!(await confirmBox({ title: 'Delete this photo?', msg, ok: 'Delete', danger: true }))) return;
     await removePhoto(p);
@@ -1340,7 +1354,7 @@ function renderForm(mode, id) {
     vals.wireNormal = wireKey(vals.wire) === wireKey(WIRE_INLAY) ? '' : vals.wire;
     if (vals.stage === 'inlay') vals.wire = canonWire(WIRE_INLAY);
     // A completed job is never the default rig for a new joint (same-joint photos keep their rig).
-    if (!S.addKeep && vals.rigId && (S.rigs.get(vals.rigId) || {}).closedAt) vals.rigId = '';
+    if ((!S.addKeep || rigReadOnly(vals.rigId)) && vals.rigId && (S.rigs.get(vals.rigId) || {}).closedAt) vals.rigId = ''; // view-only job: never add into it
     // End pre-filled with no band: use that end's default band (never overwrite a carried band).
     if (!vals.bandNumber && END_BAND[vals.end]) vals.bandNumber = END_BAND[vals.end];
     setChrome({ title: S.queue.length > 1 ? `Add photo ${S.qIndex + 1} of ${S.queue.length}` : 'Add photo', back: discardQueue, bottom: false });
@@ -1711,15 +1725,17 @@ function renderSaved() {
 function renderTools() {
   setChrome({ title: 'Tools', back: '#/', bottom: false });
   const lu = S.meta.lastUsed || {}, ls = S.lastSaved;
-  const folder = S.lastListHash && S.lastListHash.startsWith('#/folder/') ? S.lastListHash
-    : ls ? `#/folder/${encodeURIComponent(ls.customerId || '')}/${encodeURIComponent(ls.rigId || '')}`
-    : `#/folder/${encodeURIComponent(lu.customerId || '')}/${encodeURIComponent(lu.rigId || '')}`;
+  // Current / last folder, skipping completed jobs (hbp-v38): then the newest photo's open rig; none = no Open folder.
+  const fh = (c, r) => `#/folder/${encodeURIComponent(c || '')}/${encodeURIComponent(r || '')}`;
+  const cands = [S.lastListHash && S.lastListHash.startsWith('#/folder/') ? S.lastListHash : '', ls ? fh(ls.customerId, ls.rigId) : '', fh(lu.customerId, lu.rigId),
+    ...S.photos.filter((x) => x.rigId && !rigReadOnly(x.rigId)).sort((a, b) => (b.addedAt || b.createdAt) - (a.addedAt || a.createdAt)).slice(0, 1).map((x) => fh(x.customerId, x.rigId))].filter(Boolean);
+  const folder = cands.find((h) => { const r = decodeURIComponent(h.split('/')[3] || ''); return r && S.rigs.has(r) && !rigReadOnly(r); }) || '';
   const rigId = decodeURIComponent(folder.split('/')[3] || ''), rig = S.rigs.get(rigId);
   view.innerHTML = `<div class="stack" id="toolsPage">
       <button type="button" id="rejectBtn" class="btn reject-btn big block">⛔ Log rejected wire</button>
       ${rejectSummaryHTML(currentOperator())}
       <label for="libInput" class="btn secondary big block" id="toolsLibBtn">🖼 Add from library</label>
-      <a class="btn secondary big block" id="toolsFolderBtn" href="${folder}">📁 Open folder</a>
+      ${folder ? `<a class="btn secondary big block" id="toolsFolderBtn" href="${folder}">📁 Open folder</a>` : ''}
       ${rig ? `<button type="button" class="btn secondary block" id="toolsRenameBtn">✎ Rename / edit rig (${esc(rig.name)})</button>` : ''}
       <a class="btn ghost block" href="#/">Home</a>
     </div>`;
@@ -1877,6 +1893,8 @@ function startInspectionSheet() {
     const rig = pick('inspRigPick', 'rig'), cust = pick('inspCustPick', 'customer');
     const miss = [rig, cust].find((x) => x.msg);
     if (miss) { e.preventDefault(); miss.msg.textContent = miss.text; miss.el.focus(); return; }
+    const typedDone = !rig.id && rig.name && findLookup('rigs', rig.name);
+    if (typedDone && rigReadOnly(typedDone.id)) { e.preventDefault(); $('#inspRigPickMsg', m).textContent = `${typedDone.name} is a completed job (view only). Use another rig name.`; return; } // hbp-v38: never reopen silently
     const wire = wireCtl.adding ? wireCtl.commit() : wireCtl.value; // optional; a half-typed new wire is added
     if (wireCtl.adding && !wire) { e.preventDefault(); return; }
     rememberOperator(op, true);
@@ -2324,7 +2342,7 @@ async function init() {
 // itself: only the Update tap does. With an unsaved photo / photo edit or an inspection in progress the tap asks first;
 // while a sheet is open (Start inspection, Log rejected wire, a busy export…) its backdrop covers the banner, so typed
 // input is never lost. Queued team sync is in IndexedDB (the outbox), so it simply carries on after the reload.
-const APP_VERSION = 'hbp-v37'; // keep equal to VERSION in sw.js (the test suite checks)
+const APP_VERSION = 'hbp-v38'; // keep equal to VERSION in sw.js (the test suite checks)
 const verNum = (v) => { const m = /^hbp-v(\d+)$/.exec(String(v || '')); return m ? Number(m[1]) : 0; };
 // What would an update interrupt right now? '' = nothing.
 function unsavedWork() {
